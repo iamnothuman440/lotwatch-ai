@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# API Key 등 비밀 정보 (절대 GitHub에 올리지 마세요)
+.env
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db

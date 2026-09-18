@@ -1,0 +1,14 @@
+# Streamlit 화면 설정 (색상 테마, 오류 표시 방식)
+
+[theme]
+base = "light"
+primaryColor = "#1d4f91"           # 버튼 색상: 상태 색(초록/노랑/주황/빨강)과 겹치지 않는 남색
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6f8"
+textColor = "#1f2328"
+
+[client]
+showErrorDetails = "none"          # 사용자 화면에 코드 오류(traceback)를 보여주지 않습니다.
+
+[browser]
+gatherUsageStats = false
