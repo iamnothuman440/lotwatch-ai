@@ -238,11 +238,13 @@ def build_template_report(result):
         lines.append(f"- 시험방법: {ev['from']} → {ev['to']} (Lot {ev['lot']}부터, {_day(ev['date'])})")
     for e in result["events"]:
         four_m = e["four_m"]
-        records = four_m["nearby"] or ([four_m["nearest"]] if four_m["nearest"] else [])
-        label = f"변화 시점 전후 {window}일 내 4M 기록" if four_m["nearby"] else "가장 가까운 4M 기록"
-        for r in records:
-            lines.append(f"- {e['title']}의 {label}: {_day(r['date'])} {r['type']}({r['description']}), "
+        for r in four_m["nearby"]:  # 비교 범위 안의 기록: 기존 표시 그대로
+            lines.append(f"- {e['title']}의 변화 시점 전후 {window}일 내 4M 기록: {_day(r['date'])} {r['type']}({r['description']}), "
                          f"{analyzer.days_text(r['days'])}")
+        if not four_m["nearby"] and four_m["nearest"]:  # 범위 안에 없을 때만, 범위 밖 기록임을 명시
+            r = four_m["nearest"]
+            lines.append(f"- {e['title']}의 가장 가까운 4M 기록: {_day(r['date'])} {r['type']} · {r['description']} "
+                         f"({analyzer.days_text(r['days'])}, 비교 범위 밖)")
 
     lines += ["", "#### 3. 확인이 필요한 이유"]
     reasons = [f"- 규격을 벗어난 Lot이 {result['oos_lots']}개 있습니다."] if result["oos_lots"] else []

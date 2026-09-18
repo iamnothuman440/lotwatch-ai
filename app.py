@@ -67,8 +67,8 @@ def badge(status):
     return f":{STATUS_COLOR[status]}-badge[{STATUS_ICON[status]} {status}]"
 
 
-def four_m_record_text(r):
-    return f"{fmt_date(r['date'])} {r['type']} · {r['description']} ({analyzer.days_text(r['days'])})"
+def four_m_record_text(r, note=""):
+    return f"{fmt_date(r['date'])} {r['type']} · {r['description']} ({analyzer.days_text(r['days'])}{note})"
 
 
 # ── 데이터 불러오기와 분석 실행 ─────────────────────────────
@@ -337,7 +337,8 @@ def show_results(result):
         lines = [f"- {icon} **{e['title']}** (Lot {e['lot']}, {fmt_date(e['date'])}) — {e['four_m_message']}"]
         lines += [f"  - 근접한 4M 변경: {four_m_record_text(r)}" for r in four_m["nearby"]]
         if four_m["has_data"] and not four_m["nearby"] and four_m["nearest"]:
-            lines.append(f"  - 가장 가까운 4M 기록: {four_m_record_text(four_m['nearest'])}")
+            # 이 줄은 비교 범위 안에 기록이 없을 때만 나오므로, 항상 범위 밖 기록입니다.
+            lines.append(f"  - 가장 가까운 4M 기록: {four_m_record_text(four_m['nearest'], ', 비교 범위 밖')}")
         st.markdown("\n".join(lines))
 
     if changes is not None and (len(changes) or result["events"]):
