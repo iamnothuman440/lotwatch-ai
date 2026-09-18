@@ -3,11 +3,13 @@ LotWatch AI - 통계 분석 로직 (analyzer.py)
 
 화면(UI)과 관계없는 '계산'만 이 파일에 모았습니다. app.py가 아래 함수들을 불러 씁니다.
 
-- load_coa_csv()      : COA CSV 읽기 + 검증
+- read_table() → guess_coa_mapping() → prepare_coa() : COA 파일(CSV/Excel) 읽기 → 컬럼 자동 인식 → 표준 컬럼으로 변환·검증
+- load_coa_csv()      : 위 세 단계를 한 번에 (샘플 데이터용)
 - load_changes_csv()  : 4M 변경 이력 CSV 읽기 + 검증
 - run_analysis()      : 규격 판정 → 추세 비교 → 변화점 탐지 → 시험방법 변경 → 4M 비교를 한 번에 실행
 """
 
+import re
 import warnings
 
 import numpy as np
@@ -15,7 +17,16 @@ import pandas as pd
 from scipy import stats
 
 # ── 기본 설정값 ─────────────────────────────────────────────
-COA_COLUMNS = ["Lot", "Date", "Supplier", "Moisture", "Purity", "Test_Method"]  # COA CSV 필수 컬럼
+COA_COLUMNS = ["Lot", "Date", "Supplier", "Moisture", "Purity", "Test_Method"]  # 분석기에 전달되는 표준 컬럼
+# 공급사마다 다른 COA 컬럼명 → 표준 컬럼 (대소문자·공백·괄호·_·-·.·% 차이는 무시하고 비교)
+COLUMN_ALIASES = {
+    "Lot": ["Lot", "Lot No.", "Lot Number", "Batch", "Batch No.", "Batch Number"],
+    "Date": ["Date", "Test Date", "Inspection Date", "검사일", "시험일", "분석일"],
+    "Supplier": ["Supplier", "Supplier Name", "Vendor", "공급업체", "공급사"],
+    "Moisture": ["Moisture", "Moisture (%)", "Water Content", "수분", "수분(%)"],
+    "Purity": ["Purity", "Purity (%)", "Assay", "순도", "순도(%)"],
+    "Test_Method": ["Test_Method", "Test Method", "Method", "시험방법", "분석방법"],
+}
 CHANGE_COLUMNS = ["Date", "Type", "Description"]  # 4M 변경 이력 CSV 필수 컬럼
 QUALITY_ITEMS = ["Moisture", "Purity"]  # 분석할 품질 특성
 
@@ -107,16 +118,51 @@ def _parse_numbers(series, col):
     return numbers.astype(float)
 
 
+def read_table(file):
+    """CSV 또는 Excel(.xlsx, 첫 번째 시트)을 글자(문자열) 표로 읽습니다."""
+    if str(getattr(file, "name", file)).lower().endswith(".xlsx"):
+        try:
+            return pd.read_excel(file, sheet_name=0, dtype=str)
+        except Exception:
+            raise DataError("Excel 파일을 읽을 수 없습니다. 첫 번째 시트 1행에 컬럼 제목이 있는 .xlsx 파일인지 확인해주세요.")
+    return _read_csv(file)
+
+
+def _norm(name):
+    """컬럼명 비교용: 소문자로 바꾸고 글자·숫자가 아닌 것(공백, 괄호, _, -, ., % 등)은 모두 지웁니다."""
+    return re.sub(r"[\W_]+", "", str(name).lower())
+
+
+def guess_coa_mapping(columns):
+    """원본 컬럼명을 COLUMN_ALIASES와 비교해 {표준 컬럼: 원본 컬럼}을 돌려줍니다. (못 찾은 컬럼은 빠짐)"""
+    mapping = {}
+    for std, aliases in COLUMN_ALIASES.items():
+        names = {_norm(a) for a in aliases}
+        match = next((c for c in columns if _norm(c) in names), None)
+        if match is not None:
+            mapping[std] = match
+    return mapping
+
+
 def load_coa_csv(file):
-    """COA/수입검사 CSV를 읽고 검증한 뒤 날짜순으로 정렬해서 돌려줍니다."""
-    df = _standardize_columns(_read_csv(file), COA_COLUMNS, "COA CSV")
+    """COA 파일을 읽고 컬럼을 자동 인식해 검증합니다. (샘플 데이터처럼 확인 화면이 필요 없을 때)"""
+    raw = read_table(file)
+    return prepare_coa(raw, guess_coa_mapping(raw.columns))
+
+
+def prepare_coa(raw, mapping):
+    """{표준 컬럼: 원본 컬럼} 매핑대로 표준 6개 컬럼 표를 만들고, 값을 검증한 뒤 날짜순으로 정렬해서 돌려줍니다."""
+    missing = [c for c in COA_COLUMNS if c not in mapping]
+    if missing:
+        raise DataError(f"다음 필수 컬럼을 인식하지 못했습니다: {', '.join(missing)}")
+    df = pd.DataFrame({c: raw[mapping[c]] for c in COA_COLUMNS}).dropna(how="all")
     if df.empty:
-        raise DataError("CSV에 데이터가 없습니다. 제목 줄 아래에 Lot 데이터를 입력해주세요.")
+        raise DataError("파일에 데이터가 없습니다. 제목 줄 아래에 Lot 데이터를 입력해주세요.")
 
     df["Lot"] = _clean_text(df["Lot"])
     if (df["Lot"] == "").any():
         raise DataError(f"Lot 값이 비어 있는 행이 있습니다 (확인할 행: {_row_numbers(df['Lot'] == '')}).")
-    df["Date"] = _parse_dates(df["Date"], "COA CSV")
+    df["Date"] = _parse_dates(df["Date"], "COA 파일")
     for col in QUALITY_ITEMS:
         df[col] = _parse_numbers(df[col], col)
     df["Supplier"] = _clean_text(df["Supplier"])

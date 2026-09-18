@@ -72,21 +72,47 @@ def four_m_record_text(r):
 
 
 # ── 데이터 불러오기와 분석 실행 ─────────────────────────────
+def map_coa_columns(coa_file, raw):
+    """COA 컬럼 자동 인식 결과를 보여주고, 인식하지 못한 컬럼은 사용자가 직접 고르게 합니다. {표준: 원본}을 돌려줌"""
+    mapping = analyzer.guess_coa_mapping(raw.columns)
+    missing = [c for c in analyzer.COA_COLUMNS if c not in mapping]
+    if missing:
+        notice = st.empty()  # 선택 결과에 따라 안내 문구를 바꾸기 위한 자리
+        st.caption("아래에서 각 항목에 해당하는 원본 컬럼을 직접 선택해 주세요.")
+        for col in missing:
+            choice = st.selectbox(f"{col} 컬럼으로 사용할 원본 컬럼", list(raw.columns), index=None,
+                                  placeholder="원본 컬럼 선택", key=f"map_{col}_{coa_file.file_id}")
+            if choice is not None:
+                mapping[col] = choice
+        still_missing = [c for c in missing if c not in mapping]
+        if still_missing:
+            notice.error(f"다음 필수 컬럼을 인식하지 못했습니다: {', '.join(still_missing)}")
+        else:
+            notice.info(f"자동으로 인식하지 못한 컬럼({', '.join(missing)})을 직접 선택한 원본 컬럼으로 연결했습니다.")
+    st.markdown("**COA 컬럼을 다음과 같이 인식했습니다.**")
+    st.table(pd.DataFrame({"원본 컬럼": [str(mapping.get(c, "(인식하지 못함)")) for c in analyzer.COA_COLUMNS],
+                           "LotWatch 컬럼": analyzer.COA_COLUMNS}), hide_index=True)
+    return mapping
+
+
 def read_uploaded_files(coa_file, changes_file):
-    """업로드한 CSV를 바로 검사해서 결과를 알려줍니다. 문제가 없으면 DataFrame을 돌려줍니다."""
+    """업로드한 파일을 바로 검사해서 결과를 알려줍니다. 문제가 없으면 DataFrame을 돌려줍니다."""
     coa_df = changes_df = None
     if coa_file is not None:
         try:
-            coa_df = analyzer.load_coa_csv(coa_file)
-            suppliers = sorted(s for s in coa_df["Supplier"].unique() if s)
-            if len(suppliers) > 1:
-                chosen = st.selectbox(
-                    "분석할 공급사 선택",
-                    suppliers,
-                    help="여러 공급사의 데이터가 섞여 있으면 변화를 정확히 볼 수 없어 공급사별로 분석합니다.",
-                )
-                coa_df = coa_df[coa_df["Supplier"] == chosen].reset_index(drop=True)
-            st.success(f"COA 데이터 {len(coa_df)} Lot을 확인했습니다.")
+            raw = analyzer.read_table(coa_file)
+            mapping = map_coa_columns(coa_file, raw)
+            if len(mapping) == len(analyzer.COA_COLUMNS):  # 필수 컬럼을 모두 연결했을 때만 값 검증
+                coa_df = analyzer.prepare_coa(raw, mapping)
+                suppliers = sorted(s for s in coa_df["Supplier"].unique() if s)
+                if len(suppliers) > 1:
+                    chosen = st.selectbox(
+                        "분석할 공급사 선택",
+                        suppliers,
+                        help="여러 공급사의 데이터가 섞여 있으면 변화를 정확히 볼 수 없어 공급사별로 분석합니다.",
+                    )
+                    coa_df = coa_df[coa_df["Supplier"] == chosen].reset_index(drop=True)
+                st.success(f"COA 데이터 {len(coa_df)} Lot을 확인했습니다.")
         except analyzer.DataError as e:
             st.error(str(e))
             coa_df = None
@@ -375,12 +401,14 @@ with st.container(border=True):
                    "모든 Lot이 규격을 통과하지만, 최근 데이터에 변화가 숨어 있습니다.")
         sample_clicked = st.button("샘플 데이터로 분석하기", type="primary", icon=":material/play_arrow:")
 
-        st.markdown("**B. 내 CSV 업로드**")
-        coa_file = st.file_uploader("COA CSV (필수)", type="csv",
-                                    help="필수 컬럼: Lot, Date, Supplier, Moisture, Purity, Test_Method")
+        st.markdown("**B. 내 파일 업로드 (CSV · Excel)**")
+        coa_file = st.file_uploader("COA 파일 (CSV 또는 Excel, 필수)", type=["csv", "xlsx"],
+                                    help="컬럼명이 달라도 자동으로 인식합니다. 예: Batch No., 검사일, 공급업체, 수분(%), 순도(%), 시험방법")
         changes_file = st.file_uploader("4M 변경 이력 CSV (선택)", type="csv",
                                         help="필수 컬럼: Date, Type, Description")
         coa_df, changes_df = read_uploaded_files(coa_file, changes_file)
+        confirm_clicked = coa_file is not None and st.button(
+            "이대로 분석하기", type="primary", icon=":material/check:", disabled=coa_df is None)
 
         with st.expander("CSV 형식 안내 · 예시 파일 받기"):
             st.markdown("**COA CSV** — 필수 컬럼: `Lot`, `Date`, `Supplier`, `Moisture`, `Purity`, `Test_Method`")
@@ -389,7 +417,8 @@ with st.container(border=True):
             st.markdown("**4M 변경 이력 CSV (선택)** — 필수 컬럼: `Date`, `Type`, `Description`")
             st.code("Date,Type,Description\n2026-05-01,Equipment,생산설비 변경\n"
                     "2026-06-15,Material,원료 공급처 변경", language=None)
-            st.caption("날짜는 2026-01-05 형식을 권장합니다. 엑셀에서 저장한 한글 CSV도 읽을 수 있습니다.")
+            st.caption("날짜는 2026-01-05 형식을 권장합니다. 엑셀에서 저장한 한글 CSV도 읽을 수 있습니다. "
+                       "Excel(.xlsx)은 첫 번째 시트를 읽고, 컬럼명이 달라도(예: Batch No., 검사일, 수분(%)) 자동으로 인식합니다.")
             d1, d2 = st.columns(2)
             d1.download_button("COA 예시 파일 받기", SAMPLE_COA.read_bytes(), file_name="coa_sample.csv",
                                mime="text/csv", on_click="ignore", width="stretch")
@@ -409,7 +438,7 @@ with st.container(border=True):
             help="변화 시점 앞뒤로 이 기간 안에 4M 변경 이력이 있으면 '근접한 4M 변경 이력이 있다'고 판단합니다.",
         )
         start_clicked = st.button("분석 시작", type="primary", icon=":material/analytics:", width="stretch")
-        st.caption("COA CSV를 업로드하지 않고 누르면 샘플 데이터로 분석합니다.")
+        st.caption("COA 파일을 업로드하지 않고 누르면 샘플 데이터로 분석합니다.")
 
 # 버튼을 눌렀을 때 분석 실행
 if sample_clicked or (start_clicked and coa_file is None):
@@ -420,9 +449,9 @@ if sample_clicked or (start_clicked and coa_file is None):
         st.error("샘플 데이터 파일을 읽을 수 없습니다. sample_data 폴더에 CSV 파일이 있는지 확인해주세요.")
     else:
         analyze(sample_coa, sample_changes, "샘플 데이터 (coa_sample.csv, changes_sample.csv)", specs, window_days)
-elif start_clicked:
+elif start_clicked or confirm_clicked:
     if coa_df is None:
-        st.error("업로드한 COA CSV에 문제가 있어 분석할 수 없습니다. 위 안내에 따라 파일을 수정해주세요.")
+        st.error("업로드한 COA 파일에 문제가 있어 분석할 수 없습니다. 위 안내에 따라 파일을 수정하거나 컬럼을 선택해주세요.")
     elif changes_file is not None and changes_df is None:
         st.error("업로드한 4M 변경 이력 CSV에 문제가 있습니다. 파일을 수정하거나 업로드를 취소해주세요.")
     else:
@@ -430,7 +459,7 @@ elif start_clicked:
         analyze(coa_df, changes_df, source, specs, window_days)
 
 if st.session_state.result is None:
-    st.info("👆 **샘플 데이터로 분석하기**를 누르거나, COA CSV를 업로드한 뒤 **분석 시작**을 눌러주세요.")
+    st.info("👆 **샘플 데이터로 분석하기**를 누르거나, COA 파일을 업로드한 뒤 **이대로 분석하기**를 눌러주세요.")
 else:
     show_results(st.session_state.result)
 

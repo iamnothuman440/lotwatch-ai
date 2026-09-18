@@ -119,7 +119,15 @@ Date,Type,Description
 - 날짜는 `2026-01-05` 형식을 권장합니다. (`2026/1/5`, `2026.01.05`도 읽을 수 있습니다.)
 - Moisture, Purity에는 **숫자만** 입력합니다. (`<0.05`, `0.12%`처럼 기호가 있으면 오류 안내가 표시됩니다.)
 - 엑셀에서 저장한 CSV(한글 포함)도 읽을 수 있습니다.
-- 컬럼 이름의 대소문자·띄어쓰기 차이는 자동으로 맞춥니다. (예: `test method` → `Test_Method`)
+- COA는 **CSV 또는 Excel(.xlsx, 첫 번째 시트)** 로 올릴 수 있습니다.
+- 공급사마다 다른 컬럼명을 자동으로 인식합니다. 대소문자·공백·괄호·`_`·`-` 차이는 무시합니다.
+  - Lot: Lot No., Lot Number, Batch, Batch No., Batch Number
+  - Date: Test Date, Inspection Date, 검사일, 시험일, 분석일
+  - Supplier: Supplier Name, Vendor, 공급업체, 공급사
+  - Moisture: Moisture (%), Water Content, 수분, 수분(%)
+  - Purity: Purity (%), Assay, 순도, 순도(%)
+  - Test_Method: Test Method, Method, 시험방법, 분석방법
+- 업로드하면 인식 결과를 표로 먼저 보여주고, **이대로 분석하기**를 눌러야 분석합니다. 인식하지 못한 컬럼은 화면에서 원본 컬럼을 직접 선택할 수 있습니다.
 - 한 파일에 여러 공급사가 섞여 있으면 **분석할 공급사를 선택**하는 메뉴가 나타납니다.
 - 10 Lot 이상을 권장합니다. (8 Lot 미만이면 변화점 분석을 건너뜁니다.)
 - 문제가 있으면 "CSV에 Date 컬럼이 필요합니다", "Date 형식을 확인해주세요 (확인할 행: 3)"처럼 **몇 번째 행을 고쳐야 하는지** 알려줍니다.
