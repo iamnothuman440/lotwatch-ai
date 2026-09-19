@@ -30,7 +30,8 @@ COLUMN_ALIASES = {
     "Moisture": ["Moisture", "Moisture (%)", "Moisture Content", "Moisture Content (%)", "Water Content",
                  "Water Content (%)", "수분", "수분(%)", "수분 함량", "수분함량"],
     "Purity": ["Purity", "Purity (%)", "Assay", "순도", "순도(%)"],
-    "Test_Method": ["Test_Method", "Test Method", "Method", "시험방법", "분석방법"],
+    "Test_Method": ["Test_Method", "Test Method", "Method", "시험방법", "분석방법", "Analytical Method", "Test Procedure",
+                    "Analysis Method", "Analytical Procedure", "시험 방법", "분석 방법", "시험법", "분석법"],
     # 아래는 세로형(Long Format) COA 전용 컬럼
     "Parameter": ["Parameter", "Test Item", "시험항목", "검사항목"],
     "MeasuredValue": ["MeasuredValue", "Measured Value", "Result Value", "Test Result", "측정값", "측정 결과", "시험결과"],

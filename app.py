@@ -83,7 +83,8 @@ def four_m_record_text(r, note=""):
 
 # ── 데이터 불러오기와 분석 실행 ─────────────────────────────
 def map_coa_columns(coa_file, raw, required, optional=(), key=""):
-    """COA 컬럼 자동 인식 결과를 보여주고, 인식하지 못한 필수 컬럼은 사용자가 직접 고르게 합니다. {표준: 원본}을 돌려줌"""
+    """COA 컬럼 자동 인식 결과를 보여주고, 인식하지 못한 필수 컬럼(과 선택 항목인 Test_Method)은 사용자가 직접 고르게 합니다.
+    {표준: 원본}을 돌려줌"""
     guessed = analyzer.guess_coa_mapping(raw.columns)
     mapping = {c: guessed[c] for c in [*required, *optional] if c in guessed}
     missing = [c for c in required if c not in mapping]
@@ -100,6 +101,15 @@ def map_coa_columns(coa_file, raw, required, optional=(), key=""):
             notice.error(f"다음 필수 컬럼을 인식하지 못했습니다: {', '.join(still_missing)}")
         else:
             notice.info(f"자동으로 인식하지 못한 컬럼({', '.join(missing)})을 직접 선택한 원본 컬럼으로 연결했습니다.")
+    if "Test_Method" in optional and "Test_Method" not in mapping:  # 선택 항목: 자동으로 못 찾으면 직접 고르거나 '없음'
+        method_col = st.selectbox(
+            "Test_Method(시험방법) 컬럼으로 사용할 원본 컬럼 (선택)", [None, *raw.columns],
+            format_func=lambda c: "없음" if c is None else str(c), key=f"map_Test_Method_{key}{coa_file.file_id}",
+            help="시험방법 컬럼을 자동으로 찾지 못했습니다. 시험방법이 적힌 컬럼이 있으면 선택하고, 없으면 '없음'으로 두세요. "
+                 "('없음'이면 시험방법 변경 분석만 건너뜁니다.)",
+        )
+        if method_col is not None:
+            mapping["Test_Method"] = method_col
     shown = [*required, *(c for c in optional if c in mapping)]
     st.markdown("**COA 컬럼을 다음과 같이 인식했습니다.**")
     st.table(pd.DataFrame({"원본 컬럼": [str(mapping.get(c, "(인식하지 못함)")) for c in shown],

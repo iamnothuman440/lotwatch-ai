@@ -173,4 +173,96 @@ assert kpi(sample) == kpi(SINGLE) and [(e["lot"], e["title"]) for e in sample["e
     ("LOT021", "Moisture 평균 상승"), ("LOT035", "시험방법 A → B")]
 print("예시 파일: 변경 전 Wide + 변경 후 Long → 기존 단일 샘플과 같은 결과")
 
+# ── 시험방법 컬럼 이름이 달라도 인식 (alias 확장) · 자동 인식이 안 되면 직접 선택 ─────────────
+def wide_method(rows, col, value):
+    """Wide: 기존 Test_Method 컬럼을 다른 이름·값으로 바꾼 파일"""
+    return WIDE.iloc[rows].rename(columns={"Test_Method": col}).assign(**{col: value})
+
+
+def long_method(rows, col, value):
+    """Long: 시험방법 컬럼(다른 이름)을 붙인 파일"""
+    return LONG.iloc[rows].assign(**{col: value})
+
+
+def method_changes(r):
+    return [(e["lot"], e["from"], e["to"]) for e in r["method_changes"]]
+
+
+for alias in ("Analytical Method", "Test Procedure", "Analysis Method", "Analytical Procedure",
+              "시험 방법", "분석 방법", "시험법", "분석법"):
+    assert az.guess_coa_mapping(["Lot", alias])["Test_Method"] == alias, alias
+
+# 21. Wide의 'Analytical Method' → Method A 인식
+wide_a = wide_method(slice(0, 20), "Analytical Method", "Method A")
+assert az.guess_coa_mapping(wide_a.columns)["Test_Method"] == "Analytical Method"
+assert set(load(wide_a, "b.csv")["Test_Method"]) == {"Method A"}
+print("21. Wide 'Analytical Method' → Test_Method = Method A")
+
+# 22. Long의 'Test Procedure' → Method B 인식
+long_b = long_method(slice(40, 80), "Test Procedure", "Method B")
+assert az.guess_coa_mapping(long_b.columns)["Test_Method"] == "Test Procedure"
+assert set(load(long_b, "a.csv")["Test_Method"]) == {"Method B"}
+print("22. Long 'Test Procedure' → Test_Method = Method B")
+
+# 23. Wide 변경 전(Analytical Method) + Long 변경 후(Test Procedure) → Method A → B 감지
+r23 = run(load(wide_a, "b.csv"), load(long_b, "a.csv"))
+assert r23["has_method"] and method_changes(r23) == [("LOT021", "Method A", "Method B")]
+print("23. Wide → Long: Lot LOT021부터 Method A → Method B 감지")
+for name, before_df, after_df, first_after in (
+        ("Wide → Wide", wide_method(slice(0, 20), "Analysis Method", "Method A"), wide_method(slice(20, 40), "시험 방법", "Method B"), "021"),
+        ("Long → Long", long_method(slice(0, 40), "Analytical Procedure", "Method A"), long_method(slice(40, 80), "시험법", "Method B"), "LOT021"),
+        ("Long → Wide", long_method(slice(0, 40), "분석 방법", "Method A"), wide_method(slice(20, 40), "분석법", "Method B"), "021")):
+    r = run(load(before_df, "b.csv"), load(after_df, "a.csv"))
+    assert method_changes(r) == [(first_after, "Method A", "Method B")], (name, method_changes(r))
+    print(f"    {name}: {first_after}부터 Method A → Method B 감지")
+
+# 24. 목록에 없는 이름은 자동 인식하지 않고, 사용자가 고른 컬럼을 Test_Method로 사용 (앱의 직접 선택과 같은 매핑)
+odd = wide_method(slice(0, 20), "SOP Code", "Method A")
+assert "Test_Method" not in az.guess_coa_mapping(odd.columns)
+chosen = az.prepare_coa(odd, {**az.guess_coa_mapping(odd.columns), "Test_Method": "SOP Code"})
+assert set(chosen["Test_Method"]) == {"Method A"}
+assert set(load(odd, "b.csv")["Test_Method"]) == {""}  # '없음'(선택 안 함)이면 기존처럼 빈 값
+print("24. 목록에 없는 'SOP Code': 자동 인식 안 됨 → 직접 선택하면 Method A 사용, 선택 안 하면 빈 값")
+
+# 25. 시험방법 컬럼이 아예 없는 기존 파일 → 미분석 (새 alias가 다른 컬럼을 잘못 잡지 않음)
+for df in (WIDE.drop(columns=["Test_Method"]), LONG):
+    assert "Test_Method" not in az.guess_coa_mapping(df.columns)
+assert r4["method_notice"] == az.NO_METHOD_NOTICE and r4["method_change_count"] == 0
+print("25. 시험방법 컬럼 없는 기존 파일(Long 샘플 등) → 미분석 유지")
+
+# 26. 화면: 자동 인식이 안 되면 'Test_Method(시험방법) 컬럼' 선택칸이 '없음'으로 나오고, 고르면 Method A → B 감지
+from streamlit.testing.v1 import AppTest
+
+
+def compare_app(before_df, after_df):
+    at = AppTest.from_file("app.py", default_timeout=120)
+    at.secrets["OTHER"] = "x"  # 실제 secrets.toml을 읽지 않음 (Gemini 호출 없음)
+    at.run()
+    at.segmented_control(key="analysis_mode").set_value("변경 전·후 COA 비교").run()
+    for slot, df in (("before", before_df), ("after", after_df)):
+        at.file_uploader(key=f"{slot}_coa_file").upload(f"{slot}.csv", df.to_csv(index=False).encode("utf-8-sig"), "text/csv").run()
+    return at
+
+
+def method_boxes(at):
+    return [s for s in at.selectbox if s.label.startswith("Test_Method(시험방법)")]
+
+
+at = compare_app(odd, long_method(slice(40, 80), "Procedure No", "Method B"))
+boxes = method_boxes(at)
+assert len(boxes) == 2 and [b.value for b in boxes] == [None, None] and not at.exception  # 기본값 '없음'
+boxes[0].set_value("SOP Code").run()
+method_boxes(at)[1].set_value("Procedure No").run()
+next(b for b in at.button if b.label == "변경 전·후 분석하기").click().run()
+assert not at.exception and [m.value for m in at.metric][3] == "1건"
+assert any("Method A → Method B" in m.value for m in at.markdown)
+at = compare_app(odd, long_method(slice(40, 80), "Procedure No", "Method B"))  # '없음' 그대로 두면 기존처럼 미분석
+next(b for b in at.button if b.label == "변경 전·후 분석하기").click().run()
+assert [m.value for m in at.metric][3] == "미분석" and az.NO_METHOD_NOTICE in [i.value for i in at.info]
+at = compare_app(wide_a, long_b)  # 자동 인식되면 선택칸 없이 바로 사용
+assert method_boxes(at) == []
+next(b for b in at.button if b.label == "변경 전·후 분석하기").click().run()
+assert [m.value for m in at.metric][3] == "1건" and not at.exception
+print("26. 화면: 선택칸 기본값 '없음' → 고르면 A → B 감지(1건), 그대로 두면 미분석, 자동 인식되면 선택칸 없음")
+
 print("모든 테스트 통과")
