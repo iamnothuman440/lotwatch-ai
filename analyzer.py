@@ -4,9 +4,11 @@ LotWatch AI - 통계 분석 로직 (analyzer.py)
 화면(UI)과 관계없는 '계산'만 이 파일에 모았습니다. app.py가 아래 함수들을 불러 씁니다.
 
 - read_table() → guess_coa_mapping() → prepare_coa() : COA 파일(CSV/Excel) 읽기 → 컬럼 자동 인식 → 표준 컬럼으로 변환·검증
+- is_long_format() → prepare_long_coa() : 세로형(Long Format) COA를 표준 컬럼 표로 변환(pivot)·검증
 - load_coa_csv()      : 위 세 단계를 한 번에 (샘플 데이터용)
 - load_changes_csv()  : 4M 변경 이력 CSV 읽기 + 검증
 - run_analysis()      : 규격 판정 → 추세 비교 → 변화점 탐지 → 시험방법 변경 → 4M 비교를 한 번에 실행
+- run_before_after()  : 변경 전·후 표준 표를 합쳐(날짜순) run_analysis()로 분석 + compare_before_after()로 전후 평균 비교
 """
 
 import re
@@ -20,13 +22,26 @@ from scipy import stats
 COA_COLUMNS = ["Lot", "Date", "Supplier", "Moisture", "Purity", "Test_Method"]  # 분석기에 전달되는 표준 컬럼
 # 공급사마다 다른 COA 컬럼명 → 표준 컬럼 (대소문자·공백·괄호·_·-·.·% 차이는 무시하고 비교)
 COLUMN_ALIASES = {
-    "Lot": ["Lot", "Lot No.", "Lot Number", "Batch", "Batch No.", "Batch Number"],
-    "Date": ["Date", "Test Date", "Inspection Date", "검사일", "시험일", "분석일"],
-    "Supplier": ["Supplier", "Supplier Name", "Vendor", "공급업체", "공급사"],
-    "Moisture": ["Moisture", "Moisture (%)", "Water Content", "수분", "수분(%)"],
+    "Lot": ["Lot", "Lot No.", "Lot Number", "LotNo", "Batch", "Batch No.", "Batch Number", "BatchNo"],
+    "Date": ["Date", "Test Date", "Inspection Date", "InspectDate", "검사일", "시험일", "분석일"],
+    # Manufacturer(제조사)는 공급사와 다를 수 있어 넣지 않습니다.
+    "Supplier": ["Supplier", "Supplier Name", "Vendor", "VendorName", "공급업체", "공급사", "공급자", "납품업체"],
+    # 세로형 COA의 Parameter 값(시험항목 이름)도 이 두 목록으로 판별합니다. LOD(Loss on Drying)는 수분과 다를 수 있어 넣지 않습니다.
+    "Moisture": ["Moisture", "Moisture (%)", "Moisture Content", "Moisture Content (%)", "Water Content",
+                 "Water Content (%)", "수분", "수분(%)", "수분 함량", "수분함량"],
     "Purity": ["Purity", "Purity (%)", "Assay", "순도", "순도(%)"],
     "Test_Method": ["Test_Method", "Test Method", "Method", "시험방법", "분석방법"],
+    # 아래는 세로형(Long Format) COA 전용 컬럼
+    "Parameter": ["Parameter", "Test Item", "시험항목", "검사항목"],
+    "MeasuredValue": ["MeasuredValue", "Measured Value", "Result Value", "Test Result", "측정값", "측정 결과", "시험결과"],
+    "LSL": ["LSL", "Lower Spec Limit", "규격 하한", "하한"],
+    "USL": ["USL", "Upper Spec Limit", "규격 상한", "상한"],
 }
+WIDE_COLUMNS = ["Lot", "Date", "Supplier", "Moisture", "Purity"]  # 가로형 COA 필수 컬럼 (Test_Method는 있으면 사용)
+LONG_COLUMNS = ["Lot", "Date", "Supplier", "Parameter", "MeasuredValue"]  # 세로형 COA 필수 컬럼
+LONG_OPTIONAL = ["Test_Method", "LSL", "USL"]  # 세로형 COA에 있으면 쓰는 컬럼
+NO_METHOD_NOTICE = "시험방법 정보가 입력 데이터에 없어 시험방법 변경 분석은 수행하지 않습니다."
+PARTIAL_METHOD_NOTICE = "시험방법 정보가 일부 데이터에 없어 시험방법 변경 분석을 수행하지 않습니다."  # 변경 전·후 중 한쪽에만 있을 때
 CHANGE_COLUMNS = ["Date", "Type", "Description"]  # 4M 변경 이력 CSV 필수 컬럼
 QUALITY_ITEMS = ["Moisture", "Purity"]  # 분석할 품질 특성
 
@@ -85,9 +100,9 @@ def _standardize_columns(df, expected, file_label):
     return df[expected].dropna(how="all").copy()
 
 
-def _row_numbers(mask, limit=5):
-    """문제가 있는 행 번호를 엑셀 기준(제목 줄 = 1행)으로 알려줍니다."""
-    rows = [str(i + 2) for i in mask[mask].index[:limit]]
+def _row_numbers(mask, limit=5, labels=None):
+    """문제가 있는 행 번호를 엑셀 기준(제목 줄 = 1행)으로 알려줍니다. labels가 있으면 행 설명도 붙입니다. 예) 23 [LOT021 / Moisture]"""
+    rows = [str(i + 2) + (f" [{labels[i]}]" if labels is not None else "") for i in mask[mask].index[:limit]]
     more = " 등" if mask.sum() > limit else ""
     return ", ".join(rows) + more
 
@@ -105,16 +120,18 @@ def _parse_dates(series, file_label):
     return dates.dt.normalize()
 
 
-def _parse_numbers(series, col):
+def _parse_numbers(series, col, labels=None):
     text = _clean_text(series)
-    blank = text == ""
+    blank = text == ""  # 'N/A', 'NA' 같은 글자도 파일을 읽을 때 빈 값으로 바뀝니다.
     if blank.any():
-        raise DataError(f"{col} 컬럼에 빈 값이 있습니다 (확인할 행: {_row_numbers(blank)}). 값을 입력하거나 해당 행을 삭제해주세요.")
+        raise DataError(f"{col} 컬럼에 빈 값(N/A 포함)이 있습니다 (확인할 행: {_row_numbers(blank, labels=labels)}). "
+                        "값을 입력하거나 해당 행을 삭제해주세요.")
     numbers = pd.to_numeric(text, errors="coerce")
     bad = ~np.isfinite(numbers)
     if bad.any():
         row = bad[bad].index[0]
-        raise DataError(f"수치형 데이터가 아닌 값이 발견되었습니다: {col} 컬럼 {row + 2}행의 '{text[row]}' (숫자만 입력해주세요)")
+        where = f" [{labels[row]}]" if labels is not None else ""
+        raise DataError(f"수치형 데이터가 아닌 값이 발견되었습니다: {col} 컬럼 {row + 2}행{where}의 '{text[row]}' (숫자만 입력해주세요)")
     return numbers.astype(float)
 
 
@@ -145,17 +162,22 @@ def guess_coa_mapping(columns):
 
 
 def load_coa_csv(file):
-    """COA 파일을 읽고 컬럼을 자동 인식해 검증합니다. (샘플 데이터처럼 확인 화면이 필요 없을 때)"""
+    """COA 파일을 읽고 형식(Wide/Long)과 컬럼을 자동 인식해 표준 표로 돌려줍니다. (샘플 데이터처럼 확인 화면이 필요 없을 때)"""
     raw = read_table(file)
-    return prepare_coa(raw, guess_coa_mapping(raw.columns))
+    mapping = guess_coa_mapping(raw.columns)
+    return prepare_long_coa(raw, mapping)[0] if is_long_format(mapping) else prepare_coa(raw, mapping)
 
 
 def prepare_coa(raw, mapping):
-    """{표준 컬럼: 원본 컬럼} 매핑대로 표준 6개 컬럼 표를 만들고, 값을 검증한 뒤 날짜순으로 정렬해서 돌려줍니다."""
-    missing = [c for c in COA_COLUMNS if c not in mapping]
+    """{표준 컬럼: 원본 컬럼} 매핑대로 표준 6개 컬럼 표를 만들고, 값을 검증한 뒤 날짜순으로 정렬해서 돌려줍니다.
+    Test_Method 컬럼이 없으면 빈 값(미기재)으로 채웁니다. → 시험방법 변경 분석만 건너뜀"""
+    missing = [c for c in WIDE_COLUMNS if c not in mapping]
     if missing:
         raise DataError(f"다음 필수 컬럼을 인식하지 못했습니다: {', '.join(missing)}")
-    df = pd.DataFrame({c: raw[mapping[c]] for c in COA_COLUMNS}).dropna(how="all")
+    if mapping["Moisture"] == mapping["Purity"]:
+        raise DataError(f"Moisture와 Purity에 같은 원본 컬럼({mapping['Moisture']})을 연결할 수 없습니다. "
+                        "한 컬럼에 여러 시험항목의 값이 있는 세로형 COA라면 입력 형식을 Long Format으로 선택해주세요.")
+    df = pd.DataFrame({c: raw[mapping[c]] for c in COA_COLUMNS if c in mapping}).dropna(how="all")
     if df.empty:
         raise DataError("파일에 데이터가 없습니다. 제목 줄 아래에 Lot 데이터를 입력해주세요.")
 
@@ -166,10 +188,86 @@ def prepare_coa(raw, mapping):
     for col in QUALITY_ITEMS:
         df[col] = _parse_numbers(df[col], col)
     df["Supplier"] = _clean_text(df["Supplier"])
-    df["Test_Method"] = _clean_text(df["Test_Method"])
+    df["Test_Method"] = _clean_text(df["Test_Method"]) if "Test_Method" in df else ""
 
     # 같은 날짜는 파일에 적힌 순서를 유지합니다(stable).
     return df.sort_values("Date", kind="stable").reset_index(drop=True)
+
+
+def is_long_format(mapping):
+    """시험항목(Parameter) 컬럼과 측정값(MeasuredValue) 컬럼이 모두 있으면 세로형(Long Format) COA로 봅니다."""
+    return "Parameter" in mapping and "MeasuredValue" in mapping
+
+
+def prepare_long_coa(raw, mapping):
+    """세로형 COA(1행 = Lot 1개의 시험항목 1개)를 prepare_coa()와 같은 표준 표(1행 = Lot 1개)로 바꿉니다.
+    Parameter가 Moisture인 행의 MeasuredValue → Moisture, Purity인 행 → Purity (그 밖의 시험항목은 제외)
+    반환: (표준 표, 파일의 규격 {품질 특성: (LSL, USL)}, 제외한 시험항목 목록)"""
+    missing = [c for c in LONG_COLUMNS if c not in mapping]
+    if missing:
+        raise DataError(f"다음 필수 컬럼을 인식하지 못했습니다: {', '.join(missing)}")
+    df = pd.DataFrame({c: raw[mapping[c]] for c in LONG_COLUMNS + LONG_OPTIONAL if c in mapping}).dropna(how="all")
+    if df.empty:
+        raise DataError("파일에 데이터가 없습니다. 제목 줄 아래에 Lot 데이터를 입력해주세요.")
+
+    # 1) 시험항목 이름 → Moisture / Purity (대소문자·공백·괄호 차이 무시)
+    param = _clean_text(df["Parameter"])
+    if (param == "").any():
+        raise DataError(f"Parameter 값이 비어 있는 행이 있습니다 (확인할 행: {_row_numbers(param == '')}).")
+    lookup = {_norm(a): item for item in QUALITY_ITEMS for a in COLUMN_ALIASES[item]}
+    df["Parameter"] = param.map(lambda p: lookup.get(_norm(p)))
+    ignored = sorted(set(param[df["Parameter"].isna()]))
+    for item in QUALITY_ITEMS:
+        if not (df["Parameter"] == item).any():
+            raise DataError(f"{item} 데이터가 없습니다. Parameter 값에서 {item} 항목을 찾지 못했습니다. "
+                            f"(파일의 시험항목: {', '.join(sorted(set(param)))})")
+    df = df[df["Parameter"].notna()].copy()  # 분석 대상(Moisture, Purity) 행만 검증·변환합니다.
+
+    # 2) 값 검증 (행 번호는 원본 파일 기준)
+    for col in ("Lot", "Date", "Supplier"):
+        df[col] = _clean_text(df[col])
+        if (df[col] == "").any():
+            raise DataError(f"{col} 값이 비어 있는 행이 있습니다 (확인할 행: {_row_numbers(df[col] == '')}).")
+    df["Date"] = _parse_dates(df["Date"], "COA 파일")
+    df["MeasuredValue"] = _parse_numbers(df["MeasuredValue"], "MeasuredValue", df["Lot"] + " / " + param.loc[df.index])
+    dup = df.duplicated(["Lot", "Parameter"], keep=False)
+    if dup.any():  # 어느 값을 쓸지 임의로 고르지 않습니다.
+        groups = list(df[dup].groupby(["Lot", "Parameter"], sort=False))
+        detail = "; ".join(f"{lot} / {item}: {', '.join(str(i + 2) for i in g.index)}행" for (lot, item), g in groups[:5])
+        raise DataError(f"동일 Lot의 동일 시험항목이 여러 건 존재합니다. 데이터를 확인해주세요. ({detail}{' 등' if len(groups) > 5 else ''})")
+    per_lot = df.groupby("Lot", sort=False)[["Date", "Supplier"]].nunique()
+    mixed = per_lot.index[(per_lot > 1).any(axis=1)]
+    if len(mixed):
+        raise DataError(f"같은 Lot인데 행마다 Date 또는 Supplier가 다릅니다: {', '.join(mixed[:5])}. "
+                        "한 Lot의 행에는 같은 날짜와 공급사를 입력해주세요.")
+
+    # 3) Lot별 1행으로 변환 (Lot 순서는 파일에 처음 나온 순서)
+    out = df.groupby("Lot", sort=False)[["Date", "Supplier"]].first()
+    out = out.join(df.pivot(index="Lot", columns="Parameter", values="MeasuredValue"))
+    for item in QUALITY_ITEMS:
+        lacking = out.index[out[item].isna()]
+        if len(lacking):
+            raise DataError(f"{item} 측정값이 없는 Lot이 있습니다: {', '.join(lacking[:5])}{' 등' if len(lacking) > 5 else ''}. "
+                            "각 Lot에 Moisture와 Purity 행이 모두 있어야 합니다.")
+    if "Test_Method" in df:  # 시험항목별 시험방법을 Moisture → Purity 순서로 합칩니다. 예) KF / HPLC
+        df["Test_Method"] = _clean_text(df["Test_Method"])
+        out["Test_Method"] = (df.sort_values("Parameter", kind="stable").groupby("Lot")["Test_Method"]
+                              .agg(lambda s: " / ".join(dict.fromkeys(filter(None, s)))))
+    else:
+        out["Test_Method"] = ""  # 시험방법 정보 없음 (기존 분석기에서 빈 값 = 미기재)
+
+    # 4) 파일의 규격(LSL/USL): 시험항목별로 값이 하나일 때만 참고값으로 돌려줍니다.
+    specs = {}
+    for item in QUALITY_ITEMS:
+        rows = df[df["Parameter"] == item]
+        limits = [pd.to_numeric(_clean_text(rows[c]), errors="coerce").dropna().unique() if c in rows else []
+                  for c in ("LSL", "USL")]
+        spec = tuple(float(v[0]) if len(v) == 1 else None for v in limits)
+        if spec != (None, None):
+            specs[item] = spec
+
+    out = out.reset_index()[COA_COLUMNS]
+    return out.sort_values("Date", kind="stable").reset_index(drop=True), specs, ignored
 
 
 def load_changes_csv(file):
@@ -280,9 +378,10 @@ def detect_method_changes(data):
 
 def compare_with_4m(event_date, changes, window_days):
     """변화 시점 전후 window_days일 안에 4M 변경 이력이 있는지 확인합니다.
-    days: 4M 날짜 - 변화 날짜 (음수 = 변화보다 먼저, 양수 = 변화보다 나중)"""
+    days: 4M 날짜 - 변화 날짜 (음수 = 변화보다 먼저, 양수 = 변화보다 나중)
+    records: 모든 4M 기록 (AI 리포트에 기록마다 범위 안/밖 판정을 붙여 전달하기 위해 함께 돌려줌)"""
     if changes is None:
-        return {"has_data": False, "nearby": [], "nearest": None}
+        return {"has_data": False, "records": [], "nearby": [], "nearest": None}
     records = [
         {
             "date": row["Date"],
@@ -294,7 +393,7 @@ def compare_with_4m(event_date, changes, window_days):
     ]
     nearby = [r for r in records if abs(r["days"]) <= window_days]
     nearest = min(records, key=lambda r: abs(r["days"])) if records else None
-    return {"has_data": True, "nearby": nearby, "nearest": nearest}
+    return {"has_data": True, "records": records, "nearby": nearby, "nearest": nearest}
 
 
 def describe_4m(four_m, subject):
@@ -315,12 +414,13 @@ def days_text(days):
 
 
 # ── 전체 분석 ──────────────────────────────────────────────
-def run_analysis(coa, specs, changes=None, window_days=30):
+def run_analysis(coa, specs, changes=None, window_days=30, method_notice=None):
     """모든 분석을 실행하고 대시보드와 AI 리포트에 필요한 결과를 dict로 돌려줍니다.
 
     coa     : load_coa_csv()가 돌려준 DataFrame
     specs   : {"Moisture": (최소, 최대), "Purity": (최소, 최대)}
     changes : load_changes_csv()가 돌려준 DataFrame 또는 None(4M 데이터 없음)
+    method_notice : 시험방법 변경 분석을 하지 않을 이유(안내 문구). None이면 Test_Method 값으로 판단합니다.
     """
     if len(coa) < 2:
         raise DataError("분석할 데이터가 충분하지 않습니다. 최소 10개 이상의 Lot을 권장합니다.")
@@ -394,9 +494,11 @@ def run_analysis(coa, specs, changes=None, window_days=30):
         }
 
     # 2) 시험방법 변경 탐지 + 4M 비교
-    method_changes = detect_method_changes(data)
-    if (data["Test_Method"] == "").all():
-        notices.append("Test_Method 값이 모두 비어 있어 시험방법 변경 분석은 건너뛰었습니다.")
+    if method_notice is None and (data["Test_Method"] == "").all():
+        method_notice = NO_METHOD_NOTICE
+    method_changes = [] if method_notice else detect_method_changes(data)
+    if method_notice:
+        notices.append(method_notice)
     for ev in method_changes:
         ev["four_m"] = compare_with_4m(ev["date"], changes, window_days)
         ev["status"] = WATCH if ev["four_m"]["nearby"] else CHECK
@@ -448,6 +550,8 @@ def run_analysis(coa, specs, changes=None, window_days=30):
         "changes_4m": changes,
         "items": items,
         "method_changes": method_changes,
+        "has_method": method_notice is None,  # False = 시험방법 변경 분석을 하지 않음 (이유는 method_notice)
+        "method_notice": method_notice,
         "events": events,
         "oos_lots": oos_lots,
         "changes_detected": changes_detected,
@@ -458,3 +562,43 @@ def run_analysis(coa, specs, changes=None, window_days=30):
         "overall_message": message,
         "notices": notices,
     }
+
+
+# ── 변경 전·후 COA 비교 ─────────────────────────────────────
+def compare_before_after(before, after):
+    """사용자가 지정한 변경 전·후 표준 표를 단순 비교합니다. (변화 감지 판정이 아닌 평균 비교)
+    Lot 수·기간·시험방법, 품질 특성별 평균·변화량·변화율, 두 파일에 모두 있는 Lot, 날짜 역전 여부"""
+    def summary(df):
+        methods = list(dict.fromkeys(m for m in df["Test_Method"] if m))  # 빈 값 제외, 처음 나온 순서
+        return {"lots": len(df), "period": (df["Date"].min(), df["Date"].max()), "methods": methods}
+
+    items = {}
+    for item in QUALITY_ITEMS:
+        b, a = before[item].mean(), after[item].mean()
+        items[item] = {"before_mean": b, "after_mean": a, "diff": a - b,
+                       "diff_pct": (a - b) / abs(b) * 100 if b != 0 else None}  # 변경 전 평균이 0이면 변화율 없음
+    b, a = summary(before), summary(after)
+    return {
+        "before": b,
+        "after": a,
+        "combined": {"lots": b["lots"] + a["lots"],
+                     "period": (min(b["period"][0], a["period"][0]), max(b["period"][1], a["period"][1]))},
+        "items": items,
+        "duplicate_lots": sorted(set(before["Lot"]) & set(after["Lot"])),  # 경고만 하고 두 행 모두 분석에 사용
+        "dates_reversed": bool(a["period"][0] < b["period"][1]),  # 변경 후의 일부 날짜가 변경 전보다 빠름
+        "partial_method": bool(b["methods"]) != bool(a["methods"]),  # 시험방법 정보가 한쪽 파일에만 있음
+    }
+
+
+def run_before_after(before, after, specs, changes=None, window_days=30):
+    """변경 전·후 표준 표를 합쳐 날짜순으로 정렬한 뒤(같은 날짜는 변경 전 먼저) 기존 run_analysis()로 분석합니다.
+    전후 구분은 사용자가 지정한 그대로 쓰고, 분석기에는 표준 6개 컬럼만 넘깁니다. 전후 비교는 result["comparison"]에 붙입니다."""
+    comparison = compare_before_after(before, after)
+    combined = (pd.concat([before.assign(Change_Period="Before"), after.assign(Change_Period="After")], ignore_index=True)
+                .sort_values("Date", kind="stable").reset_index(drop=True))
+    # 시험방법 정보가 한쪽 파일에만 있으면 전후 시험방법을 비교할 수 없으므로 시험방법 변경 분석은 하지 않습니다.
+    notice = PARTIAL_METHOD_NOTICE if comparison["partial_method"] else None
+    result = run_analysis(combined[COA_COLUMNS], specs, changes, window_days, notice)
+    comparison["periods"] = combined["Change_Period"].tolist()  # result["data"]와 같은 행 순서
+    result["comparison"] = comparison
+    return result

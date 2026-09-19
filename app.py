@@ -20,6 +20,9 @@ import analyzer
 BASE_DIR = Path(__file__).parent
 SAMPLE_COA = BASE_DIR / "sample_data" / "coa_sample.csv"
 SAMPLE_CHANGES = BASE_DIR / "sample_data" / "changes_sample.csv"
+SAMPLE_LONG_COA = BASE_DIR / "sample_data" / "coa_long_sample.csv"  # 세로형(Long Format) COA 예시
+SAMPLE_BEFORE = BASE_DIR / "sample_data" / "coa_before_sample.csv"  # 변경 전·후 비교 예시: 변경 전 (Wide Format)
+SAMPLE_AFTER = BASE_DIR / "sample_data" / "coa_after_sample.csv"  # 변경 후 (Long Format)
 
 # 상태 표시: 색상은 상태를 구분할 때만 쓰고, 항상 아이콘 + 글자와 함께 보여줍니다.
 STATUS_ICON = {analyzer.OK: "🟢", analyzer.WATCH: "🟡", analyzer.CHECK: "🟠", analyzer.OOS: "🔴"}
@@ -35,6 +38,9 @@ METHOD_COLOR = "#52514e"  # 시험방법 변경
 
 # 규격 입력 기본값: (최소값, 최대값, 입력 간격)
 DEFAULT_SPECS = {"Moisture": (0.0, 0.50, 0.01), "Purity": (99.0, 100.0, 0.1)}
+COA_FORMATS = ["Wide Format (가로형 · 1행 = 1 Lot)", "Long Format (세로형 · 1행 = 1 시험항목)"]
+ANALYSIS_MODES = ["단일 COA 분석", "변경 전·후 COA 비교"]
+COMPARE_SLOTS = (("before", "변경 전"), ("after", "변경 후"))  # 전후 구분은 사용자가 올린 칸을 그대로 따름
 
 st.set_page_config(page_title="LotWatch AI", page_icon="🔍", layout="wide")
 
@@ -58,6 +64,10 @@ def fmt_date(date):
     return date.strftime("%Y-%m-%d")
 
 
+def fmt_period(period):
+    return f"{fmt_date(period[0])} ~ {fmt_date(period[1])}"
+
+
 def fmt_spec(spec):
     return f"{spec[0]:.2f} ~ {spec[1]:.2f}"
 
@@ -72,16 +82,17 @@ def four_m_record_text(r, note=""):
 
 
 # ── 데이터 불러오기와 분석 실행 ─────────────────────────────
-def map_coa_columns(coa_file, raw):
-    """COA 컬럼 자동 인식 결과를 보여주고, 인식하지 못한 컬럼은 사용자가 직접 고르게 합니다. {표준: 원본}을 돌려줌"""
-    mapping = analyzer.guess_coa_mapping(raw.columns)
-    missing = [c for c in analyzer.COA_COLUMNS if c not in mapping]
+def map_coa_columns(coa_file, raw, required, optional=(), key=""):
+    """COA 컬럼 자동 인식 결과를 보여주고, 인식하지 못한 필수 컬럼은 사용자가 직접 고르게 합니다. {표준: 원본}을 돌려줌"""
+    guessed = analyzer.guess_coa_mapping(raw.columns)
+    mapping = {c: guessed[c] for c in [*required, *optional] if c in guessed}
+    missing = [c for c in required if c not in mapping]
     if missing:
         notice = st.empty()  # 선택 결과에 따라 안내 문구를 바꾸기 위한 자리
         st.caption("아래에서 각 항목에 해당하는 원본 컬럼을 직접 선택해 주세요.")
         for col in missing:
             choice = st.selectbox(f"{col} 컬럼으로 사용할 원본 컬럼", list(raw.columns), index=None,
-                                  placeholder="원본 컬럼 선택", key=f"map_{col}_{coa_file.file_id}")
+                                  placeholder="원본 컬럼 선택", key=f"map_{col}_{key}{coa_file.file_id}")
             if choice is not None:
                 mapping[col] = choice
         still_missing = [c for c in missing if c not in mapping]
@@ -89,51 +100,124 @@ def map_coa_columns(coa_file, raw):
             notice.error(f"다음 필수 컬럼을 인식하지 못했습니다: {', '.join(still_missing)}")
         else:
             notice.info(f"자동으로 인식하지 못한 컬럼({', '.join(missing)})을 직접 선택한 원본 컬럼으로 연결했습니다.")
+    shown = [*required, *(c for c in optional if c in mapping)]
     st.markdown("**COA 컬럼을 다음과 같이 인식했습니다.**")
-    st.table(pd.DataFrame({"원본 컬럼": [str(mapping.get(c, "(인식하지 못함)")) for c in analyzer.COA_COLUMNS],
-                           "LotWatch 컬럼": analyzer.COA_COLUMNS}), hide_index=True)
+    st.table(pd.DataFrame({"원본 컬럼": [str(mapping.get(c, "(인식하지 못함)")) for c in shown],
+                           "LotWatch 컬럼": shown}), hide_index=True)
     return mapping
 
 
-def read_uploaded_files(coa_file, changes_file):
-    """업로드한 파일을 바로 검사해서 결과를 알려줍니다. 문제가 없으면 DataFrame을 돌려줍니다."""
-    coa_df = changes_df = None
-    if coa_file is not None:
-        try:
-            raw = analyzer.read_table(coa_file)
-            mapping = map_coa_columns(coa_file, raw)
-            if len(mapping) == len(analyzer.COA_COLUMNS):  # 필수 컬럼을 모두 연결했을 때만 값 검증
+def show_long_preview(coa_df, ignored):
+    """세로형 COA를 표준 형식으로 바꾼 결과를 분석 전에 보여줍니다."""
+    st.markdown("**입력 형식:** Long Format COA (세로형) · **변환 상태:** 정상")
+    st.caption("변환된 데이터 미리보기 (처음 5 Lot)")
+    preview = coa_df.head().assign(Date=lambda d: d["Date"].dt.strftime("%Y-%m-%d"),
+                                   Test_Method=lambda d: d["Test_Method"].replace("", "미기재"))
+    st.dataframe(preview.style.format({item: "{:g}" for item in analyzer.QUALITY_ITEMS}), hide_index=True)
+    if ignored:
+        st.info(f"Moisture·Purity가 아닌 시험항목은 분석에서 제외했습니다: {', '.join(ignored)}")
+
+
+def read_coa_file(coa_file, key=""):
+    """업로드한 COA 파일 1개를 형식 인식 → 컬럼 매핑 → 검증·변환해서 (표준 표, 파일의 규격(LSL/USL), 형식 이름)을 돌려줍니다.
+    key: 변경 전·후 비교처럼 파일을 여러 개 받을 때 위젯이 겹치지 않도록 붙이는 구분자. 문제가 있으면 표는 None"""
+    coa_df, file_specs, is_long = None, {}, False
+    try:
+        raw = analyzer.read_table(coa_file)
+        auto_long = analyzer.is_long_format(analyzer.guess_coa_mapping(raw.columns))
+        is_long = st.radio(
+            "COA 입력 형식", COA_FORMATS, index=int(auto_long), horizontal=True, key=f"format_{key}{coa_file.file_id}",
+            help="컬럼을 보고 자동으로 선택했습니다. 잘못 인식했다면 직접 바꿔주세요.",
+        ) == COA_FORMATS[1]
+        if is_long:
+            mapping = map_coa_columns(coa_file, raw, analyzer.LONG_COLUMNS, analyzer.LONG_OPTIONAL, key)
+            if all(c in mapping for c in analyzer.LONG_COLUMNS):  # 필수 컬럼을 모두 연결했을 때만 변환·검증
+                coa_df, file_specs, ignored = analyzer.prepare_long_coa(raw, mapping)
+        else:
+            mapping = map_coa_columns(coa_file, raw, analyzer.WIDE_COLUMNS, ["Test_Method"], key)
+            if all(c in mapping for c in analyzer.WIDE_COLUMNS):
                 coa_df = analyzer.prepare_coa(raw, mapping)
-                suppliers = sorted(s for s in coa_df["Supplier"].unique() if s)
-                if len(suppliers) > 1:
-                    chosen = st.selectbox(
-                        "분석할 공급사 선택",
-                        suppliers,
-                        help="여러 공급사의 데이터가 섞여 있으면 변화를 정확히 볼 수 없어 공급사별로 분석합니다.",
-                    )
-                    coa_df = coa_df[coa_df["Supplier"] == chosen].reset_index(drop=True)
+        if coa_df is not None:
+            suppliers = sorted(s for s in coa_df["Supplier"].unique() if s)
+            if len(suppliers) > 1:
+                chosen = st.selectbox(
+                    "분석할 공급사 선택",
+                    suppliers,
+                    help="여러 공급사의 데이터가 섞여 있으면 변화를 정확히 볼 수 없어 공급사별로 분석합니다.",
+                    key=f"supplier_{key}{coa_file.file_id}",
+                )
+                coa_df = coa_df[coa_df["Supplier"] == chosen].reset_index(drop=True)
+            if is_long:
+                show_long_preview(coa_df, ignored)
+            if (coa_df["Test_Method"] == "").all():  # 가로형·세로형 모두: 시험방법 정보 없음 안내
+                st.info(analyzer.NO_METHOD_NOTICE)
+            if key:  # 변경 전·후 비교: 파일마다 변환 상태·형식·Lot 수·기간을 한 줄로
+                st.success(f"변환 상태: 정상 · 입력 형식: {'Long' if is_long else 'Wide'} Format · "
+                           f"Lot {len(coa_df)}개 · 기간 {fmt_date(coa_df['Date'].min())} ~ {fmt_date(coa_df['Date'].max())}")
+            else:
                 st.success(f"COA 데이터 {len(coa_df)} Lot을 확인했습니다.")
-        except analyzer.DataError as e:
-            st.error(str(e))
-            coa_df = None
-    if changes_file is not None:
-        try:
-            changes_df = analyzer.load_changes_csv(changes_file)
-            st.success(f"4M 변경 이력 {len(changes_df)}건을 확인했습니다.")
-        except analyzer.DataError as e:
-            st.error(str(e))
-            changes_df = None
-    return coa_df, changes_df
+    except analyzer.DataError as e:
+        st.error(str(e))
+        coa_df = None
+    return coa_df, file_specs, "Long Format" if is_long else "Wide Format"
 
 
-def analyze(coa_df, changes_df, source, specs, window_days):
-    """분석을 실행하고 결과를 session_state에 저장합니다. (버튼을 다시 눌러도 결과가 유지되도록)"""
+def read_changes_file(changes_file):
+    """4M 변경 이력 CSV를 바로 검사합니다. 문제가 없으면 DataFrame, 파일이 없거나 문제가 있으면 None"""
+    if changes_file is None:
+        return None
+    try:
+        changes_df = analyzer.load_changes_csv(changes_file)
+    except analyzer.DataError as e:
+        st.error(str(e))
+        return None
+    st.success(f"4M 변경 이력 {len(changes_df)}건을 확인했습니다.")
+    return changes_df
+
+
+def show_comparison_warnings(c):
+    """변경 전·후 데이터를 합칠 때 확인할 점을 경고합니다. (분석은 사용자가 지정한 전후 구분 그대로 진행)"""
+    if c["duplicate_lots"]:
+        shown = ", ".join(c["duplicate_lots"][:10]) + (" 등" if len(c["duplicate_lots"]) > 10 else "")
+        st.warning("변경 전·후 데이터에 동일한 Lot 번호가 존재합니다. 동일 Lot이 중복 포함되었는지 확인해주세요. "
+                   f"(중복 Lot: {shown} · 두 행 모두 분석에 포함)")
+    if c["dates_reversed"]:
+        st.warning("변경 후 데이터의 일부 날짜가 변경 전 데이터보다 빠릅니다. 입력한 전후 구분을 확인해주세요.")
+
+
+def apply_file_specs(file_specs):
+    """[COA 규격을 입력칸에 적용] 버튼: 파일의 LSL/USL을 규격 입력칸에 넣습니다. (값이 없는 쪽은 그대로 둠)"""
+    for item, limits in file_specs.items():
+        for side, value in zip(("low", "high"), limits):
+            if value is not None:
+                st.session_state[f"spec_{item}_{side}"] = value
+
+
+def show_file_specs(file_specs, specs, label="업로드한 COA", key=""):
+    """세로형 COA의 LSL/USL을 참고값으로 보여줍니다. 분석에는 항상 사용자가 확인한 입력칸의 규격을 씁니다."""
+    limit = lambda v: "–" if v is None else f"{v:.2f}"
+    text = " · ".join(f"{item} {limit(lo)} ~ {limit(hi)}" for item, (lo, hi) in file_specs.items()).replace("~", r"\~")
+    if all(v is None or v == specs[item][i] for item, limits in file_specs.items() for i, v in enumerate(limits)):
+        st.caption(f"✅ 입력한 규격이 {label}의 규격(LSL/USL)과 같습니다: {text}")
+        return
+    st.warning(f"{label}의 규격(LSL/USL): {text}\n\n입력한 규격과 다릅니다. 분석에는 위 입력칸의 규격이 사용됩니다.")
+    st.button("COA 규격을 입력칸에 적용", on_click=apply_file_specs, args=(file_specs,), icon=":material/input:",
+              key=f"apply_specs_{key}")
+
+
+def analyze(coa_df, changes_df, source, specs, window_days, after_df=None, files=None):
+    """분석을 실행하고 결과를 session_state에 저장합니다. (버튼을 다시 눌러도 결과가 유지되도록)
+    after_df가 있으면 coa_df(변경 전)와 after_df(변경 후)를 합쳐 분석합니다. files: {"before": (파일 이름, 형식), "after": ...}"""
     for item, (low, high) in specs.items():
         if low >= high:
             st.error(f"{item} 규격의 최소값은 최대값보다 작아야 합니다.")
             return
     try:
-        result = analyzer.run_analysis(coa_df, specs, changes_df, window_days)
+        if after_df is None:
+            result = analyzer.run_analysis(coa_df, specs, changes_df, window_days)
+        else:
+            result = analyzer.run_before_after(coa_df, after_df, specs, changes_df, window_days)
+            result["comparison"]["files"] = files
     except analyzer.DataError as e:
         st.error(str(e))
         return
@@ -211,6 +295,16 @@ def make_trend_chart(result, item):
             if dates.iloc[0] <= row.Date <= dates.iloc[-1]:
                 add_event_line(fig, row.Date, dates, f"4M · {row.Type}", GUIDE_COLOR, "dot", 1, "bottom")
 
+    # 6) 변경 전·후 비교: 변경 후 COA 구간을 옅은 회색으로 칠해 전환 지점을 표시 (날짜가 겹치면 전환 지점이 없어 생략)
+    c = result.get("comparison")
+    if c and not c["dates_reversed"]:
+        before_end, after_start = c["before"]["period"][1], c["after"]["period"][0]
+        x = before_end + (after_start - before_end) / 2
+        fig.add_vrect(x0=x, x1=dates.iloc[-1], fillcolor=GUIDE_COLOR, opacity=0.12, line_width=0, layer="below")
+        for text, anchor, shift in (("← 변경 전", "right", -4), ("변경 후 →", "left", 4)):
+            fig.add_annotation(x=x, y=0.86, yref="paper", text=text, showarrow=False, xanchor=anchor, xshift=shift,
+                               font=dict(size=11, color=METHOD_COLOR))
+
     # y축은 측정값과 규격 한계가 모두 보이도록
     y_min = min(data[item].min(), low)
     y_max = max(data[item].max(), high)
@@ -228,6 +322,24 @@ def make_trend_chart(result, item):
 
 
 # ── 결과 화면 구성 ─────────────────────────────────────────
+def show_comparison(c):
+    """변경 전·후 비교 모드: 분석에 쓴 두 파일과 전후 평균을 결과 맨 위에 보여줍니다."""
+    st.markdown("#### 분석 데이터")
+    rows = [{"구분": label, "파일": c["files"][key][0], "형식": c["files"][key][1],
+             "Lot 수": f"{c[key]['lots']}개", "기간": fmt_period(c[key]["period"])} for key, label in COMPARE_SLOTS]
+    rows.append({"구분": "통합 분석", "파일": "–", "형식": "–", "Lot 수": f"{c['combined']['lots']}개",
+                 "기간": fmt_period(c["combined"]["period"])})
+    st.table(pd.DataFrame(rows), hide_index=True)
+    show_comparison_warnings(c)
+
+    st.markdown("#### 변경 전·후 품질 비교")
+    st.table(pd.DataFrame([{"항목": item, "변경 전 평균": fmt(v["before_mean"]), "변경 후 평균": fmt(v["after_mean"]),
+                            "변화량": f"{v['diff']:+.3f}", "변화율": fmt_pct(v["diff_pct"]) or "계산 불가 (변경 전 평균 0)"}
+                           for item, v in c["items"].items()]), hide_index=True)
+    st.caption("변경 전·후 파일의 단순 평균 비교입니다. 통계적으로 의미 있는 변화인지는 아래 '품질 변화 감지'(변화점 분석) 결과를 "
+               "기준으로 판단하며, 파일이 나뉜 시점을 변화의 원인으로 판단하지 않습니다.")
+
+
 def show_item_detail(info):
     """품질 특성 1개의 변화 탐지 결과 (그래프 오른쪽 설명)"""
     st.markdown(f"**{info['message']}**")
@@ -275,6 +387,9 @@ def show_results(result):
         f"분석 대상: {st.session_state.source} · 공급사: {', '.join(result['suppliers']) or '미기재'} · "
         f"기간: {fmt_date(start)} ~ {fmt_date(end)} · 4M 비교 기간: 변화 시점 전후 {result['window_days']}일"
     )
+    comparison = result.get("comparison")  # 변경 전·후 비교 모드일 때만 있음
+    if comparison:
+        show_comparison(comparison)
     for notice in result["notices"]:
         st.warning(notice)
 
@@ -288,8 +403,8 @@ def show_results(result):
         with st.container(horizontal=True):
             st.metric("품질 변화 감지", f"{result['quality_changes']}건", border=True,
                       help="평균이 통계적으로 달라진 품질 특성 수 (Moisture, Purity 각각 최대 1건)")
-            st.metric("시험방법 변경", f"{result['method_change_count']}건", border=True,
-                      help="Test_Method 값이 바뀐 횟수 (예: A → B)")
+            st.metric("시험방법 변경", f"{result['method_change_count']}건" if result["has_method"] else "미분석", border=True,
+                      help="Test_Method 값이 바뀐 횟수 (예: A → B)" if result["has_method"] else result["method_notice"])
             st.metric("확인 권고", f"{result['check_recommended']}건", border=True,
                       help="품질 변화·시험방법 변경 중, 변화 시점 전후로 등록된 4M 변경 이력이 확인되지 않은 건수")
 
@@ -300,8 +415,12 @@ def show_results(result):
 
     # 품질 특성별 그래프 + 변화 탐지 결과
     st.markdown("#### 품질 특성 추세와 변화 탐지")
+    band = ""
+    if comparison:
+        band = (" · 변경 전·후 날짜가 겹쳐 전환 지점은 표시하지 않았습니다" if comparison["dates_reversed"]
+                else " · 회색 음영 = 변경 후 COA 구간")
     st.caption("그래프 보는 법: 파란 선 = 측정값 · 빨간 파선 = 규격 상/하한 · 주황 세로선 = 변화 시점 · "
-               "가로 실선 = 구간 평균(회색: 변화 전, 주황: 변화 후) · 점선 = 시험방법 변경 / 4M 변경")
+               "가로 실선 = 구간 평균(회색: 변화 전, 주황: 변화 후) · 점선 = 시험방법 변경 / 4M 변경" + band)
     for item in analyzer.QUALITY_ITEMS:
         info = result["items"][item]
         with st.container(border=True):
@@ -315,7 +434,9 @@ def show_results(result):
 
     # 시험방법 변화
     st.markdown("#### 시험방법 변화")
-    if not result["method_changes"]:
+    if not result["has_method"]:
+        st.info(result["method_notice"])
+    elif not result["method_changes"]:
         st.success("🟢 분석 기간 동안 시험방법(Test_Method) 변경이 감지되지 않았습니다.")
     for ev in result["method_changes"]:
         with st.container(border=True):
@@ -375,6 +496,8 @@ def show_results(result):
     with st.expander("Lot별 상세 데이터 (규격 판정 결과)"):
         table = result["data"].copy()
         table["Date"] = table["Date"].dt.strftime("%Y-%m-%d")
+        if comparison:  # 변경 전·후 비교: 각 Lot이 어느 파일에서 왔는지 (Before / After)
+            table.insert(1, "Change_Period", comparison["periods"])
         judge_cols = [f"{item}_판정" for item in analyzer.QUALITY_ITEMS] + ["종합판정"]
         styled = table.style.map(
             lambda v: "background-color: rgba(208, 59, 59, 0.15)" if v == "OUT OF SPEC" else "", subset=judge_cols
@@ -397,33 +520,83 @@ with st.container(border=True):
 
     with data_col:
         st.markdown("##### ① 데이터 선택")
-        st.markdown("**A. 샘플 데이터로 체험**")
-        st.caption("A사 원료 40 Lot의 COA 예시 데이터와 4M 변경 이력 2건입니다. "
-                   "모든 Lot이 규격을 통과하지만, 최근 데이터에 변화가 숨어 있습니다.")
-        sample_clicked = st.button("샘플 데이터로 분석하기", type="primary", icon=":material/play_arrow:")
+        compare_mode = st.segmented_control(
+            "분석 방식", ANALYSIS_MODES, default=ANALYSIS_MODES[0], required=True, key="analysis_mode",
+            help="변경 전·후 COA 비교: 공정·원료 등의 변경 전후 COA 2개를 각각 올려, 합친 데이터를 기존 분석기로 분석합니다.",
+        ) == ANALYSIS_MODES[1]
+        sample_clicked = confirm_clicked = compare_clicked = False
+        coa_file = coa_df = None
+        file_specs, loaded = [], {}  # file_specs: (표시 이름, 위젯 구분자, 파일의 LSL/USL) 목록
+        if compare_mode:
+            st.caption("변경 전·후 COA를 각각 올리면 파일마다 형식(Wide/Long)을 인식해 표준 형식으로 바꾼 뒤, 두 데이터를 "
+                       "날짜순으로 합쳐 분석합니다. 변경 전·후 구분은 날짜로 추측하지 않고 올린 칸을 그대로 따릅니다.")
+            for key, label in COMPARE_SLOTS:
+                with st.container(border=True):
+                    upload = st.file_uploader(f"{label} COA 파일 (CSV 또는 Excel)", type=["csv", "xlsx"],
+                                              key=f"{key}_coa_file")
+                    if upload is not None:
+                        loaded[key] = (upload, *read_coa_file(upload, key))  # (파일, 표준 표, LSL/USL, 형식 이름)
+                        if loaded[key][2]:
+                            file_specs.append((f"{label} COA", key, loaded[key][2]))
+        else:
+            st.markdown("**A. 샘플 데이터로 체험**")
+            st.caption("A사 원료 40 Lot의 COA 예시 데이터와 4M 변경 이력 2건입니다. "
+                       "모든 Lot이 규격을 통과하지만, 최근 데이터에 변화가 숨어 있습니다.")
+            sample_clicked = st.button("샘플 데이터로 분석하기", type="primary", icon=":material/play_arrow:")
 
-        st.markdown("**B. 내 파일 업로드 (CSV · Excel)**")
-        coa_file = st.file_uploader("COA 파일 (CSV 또는 Excel, 필수)", type=["csv", "xlsx"],
-                                    help="컬럼명이 달라도 자동으로 인식합니다. 예: Batch No., 검사일, 공급업체, 수분(%), 순도(%), 시험방법")
+            st.markdown("**B. 내 파일 업로드 (CSV · Excel)**")
+            coa_file = st.file_uploader("COA 파일 (CSV 또는 Excel, 필수)", type=["csv", "xlsx"],
+                                        help="컬럼명이 달라도 자동으로 인식합니다. 예: Batch No., 검사일, 공급업체, 수분(%), 순도(%), 시험방법 · "
+                                             "시험항목별로 한 행씩 적힌 세로형 COA(Parameter, MeasuredValue)도 인식합니다.")
         changes_file = st.file_uploader("4M 변경 이력 CSV (선택)", type="csv",
                                         help="필수 컬럼: Date, Type, Description")
-        coa_df, changes_df = read_uploaded_files(coa_file, changes_file)
-        confirm_clicked = coa_file is not None and st.button(
-            "이대로 분석하기", type="primary", icon=":material/check:", disabled=coa_df is None)
+        if coa_file is not None:
+            coa_df, found_specs, _ = read_coa_file(coa_file)
+            if found_specs:
+                file_specs.append(("업로드한 COA", "", found_specs))
+        changes_df = read_changes_file(changes_file)
+        if compare_mode:
+            ready = all(loaded.get(key, (None, None))[1] is not None for key, _ in COMPARE_SLOTS)
+            if ready:  # 두 파일을 합치기 전에 통합 기간과 확인할 점을 보여줌
+                check = analyzer.compare_before_after(loaded["before"][1], loaded["after"][1])
+                st.markdown(f"**통합 분석:** Lot {check['combined']['lots']}개 · 기간 {fmt_period(check['combined']['period'])}")
+                show_comparison_warnings(check)
+                if check["partial_method"]:
+                    st.info(analyzer.PARTIAL_METHOD_NOTICE)
+            compare_clicked = st.button("변경 전·후 분석하기", type="primary", icon=":material/compare_arrows:",
+                                        disabled=not ready)
+        else:
+            confirm_clicked = coa_file is not None and st.button(
+                "이대로 분석하기", type="primary", icon=":material/check:", disabled=coa_df is None)
 
         with st.expander("CSV 형식 안내 · 예시 파일 받기"):
-            st.markdown("**COA CSV** — 필수 컬럼: `Lot`, `Date`, `Supplier`, `Moisture`, `Purity`, `Test_Method`")
+            st.markdown("**COA CSV** — 필수 컬럼: `Lot`, `Date`, `Supplier`, `Moisture`, `Purity` "
+                        "(선택: `Test_Method` — 없으면 시험방법 변경 분석만 건너뜀)")
             st.code("Lot,Date,Supplier,Moisture,Purity,Test_Method\n"
                     "001,2026-01-05,A사,0.12,99.5,A\n002,2026-01-12,A사,0.13,99.5,A", language=None)
+            st.markdown("**세로형(Long Format) COA** — 시험항목마다 한 행: `LotNo`, `InspectDate`, `VendorName`, "
+                        "`Parameter`, `MeasuredValue` (선택: `LSL`, `USL`, 시험방법)")
+            st.code("LotNo,InspectDate,VendorName,Parameter,LSL,USL,MeasuredValue\n"
+                    "LOT001,2026-01-01,A사,Moisture,0.00,0.50,0.14\nLOT001,2026-01-01,A사,Purity,99.00,100.00,99.50",
+                    language=None)
             st.markdown("**4M 변경 이력 CSV (선택)** — 필수 컬럼: `Date`, `Type`, `Description`")
             st.code("Date,Type,Description\n2026-05-01,Equipment,생산설비 변경\n"
                     "2026-06-15,Material,원료 공급처 변경", language=None)
             st.caption("날짜는 2026-01-05 형식을 권장합니다. 엑셀에서 저장한 한글 CSV도 읽을 수 있습니다. "
                        "Excel(.xlsx)은 첫 번째 시트를 읽고, 컬럼명이 달라도(예: Batch No., 검사일, 수분(%)) 자동으로 인식합니다.")
-            d1, d2 = st.columns(2)
+            d1, d2, d3 = st.columns(3)
             d1.download_button("COA 예시 파일 받기", SAMPLE_COA.read_bytes(), file_name="coa_sample.csv",
                                mime="text/csv", on_click="ignore", width="stretch")
-            d2.download_button("4M 예시 파일 받기", SAMPLE_CHANGES.read_bytes(), file_name="changes_sample.csv",
+            d2.download_button("세로형 COA 예시 받기", SAMPLE_LONG_COA.read_bytes(), file_name="coa_long_sample.csv",
+                               mime="text/csv", on_click="ignore", width="stretch")
+            d3.download_button("4M 예시 파일 받기", SAMPLE_CHANGES.read_bytes(), file_name="changes_sample.csv",
+                               mime="text/csv", on_click="ignore", width="stretch")
+            st.markdown("**변경 전·후 COA 비교** — 변경 전·후 COA를 각각 올립니다. 두 파일의 형식(Wide/Long)과 컬럼명이 "
+                        "달라도 됩니다. (아래 예시: 변경 전 Wide, 변경 후 Long · 가상 데이터)")
+            d4, d5 = st.columns(2)
+            d4.download_button("변경 전 예시 받기 (Wide)", SAMPLE_BEFORE.read_bytes(), file_name=SAMPLE_BEFORE.name,
+                               mime="text/csv", on_click="ignore", width="stretch")
+            d5.download_button("변경 후 예시 받기 (Long)", SAMPLE_AFTER.read_bytes(), file_name=SAMPLE_AFTER.name,
                                mime="text/csv", on_click="ignore", width="stretch")
 
     with spec_col:
@@ -431,18 +604,45 @@ with st.container(border=True):
         specs = {}
         for item, (low, high, step) in DEFAULT_SPECS.items():
             c1, c2 = st.columns(2)
-            spec_low = c1.number_input(f"{item} 최소값", value=low, step=step, format="%.2f")
-            spec_high = c2.number_input(f"{item} 최대값", value=high, step=step, format="%.2f")
+            # 기본값은 session_state로 넣습니다. ([COA 규격을 입력칸에 적용] 버튼이 같은 칸의 값을 바꿀 수 있도록)
+            st.session_state.setdefault(f"spec_{item}_low", low)
+            st.session_state.setdefault(f"spec_{item}_high", high)
+            spec_low = c1.number_input(f"{item} 최소값", step=step, format="%.2f", key=f"spec_{item}_low")
+            spec_high = c2.number_input(f"{item} 최대값", step=step, format="%.2f", key=f"spec_{item}_high")
             specs[item] = (spec_low, spec_high)
+        for label, key, found_specs in file_specs:
+            show_file_specs(found_specs, specs, label, key)
         window_days = st.slider(
             "4M 비교 기간: 변화 시점 전후 (일)", min_value=7, max_value=90, value=30,
             help="변화 시점 앞뒤로 이 기간 안에 4M 변경 이력이 있으면 '근접한 4M 변경 이력이 있다'고 판단합니다.",
         )
         start_clicked = st.button("분석 시작", type="primary", icon=":material/analytics:", width="stretch")
-        st.caption("COA 파일을 업로드하지 않고 누르면 샘플 데이터로 분석합니다.")
+        st.caption("변경 전·후 COA를 올리지 않고 누르면 예시 데이터(변경 전 Wide · 변경 후 Long)로 분석합니다." if compare_mode
+                   else "COA 파일을 업로드하지 않고 누르면 샘플 데이터로 분석합니다.")
 
 # 버튼을 눌렀을 때 분석 실행
-if sample_clicked or (start_clicked and coa_file is None):
+if compare_mode:
+    if start_clicked and not loaded:  # 파일 없이 [분석 시작] → 변경 전·후 예시 데이터 (단일 모드의 샘플과 같은 방식)
+        try:
+            sample_before, sample_after = analyzer.load_coa_csv(SAMPLE_BEFORE), analyzer.load_coa_csv(SAMPLE_AFTER)
+            sample_changes = analyzer.load_changes_csv(SAMPLE_CHANGES)
+        except (FileNotFoundError, analyzer.DataError):
+            st.error("예시 데이터 파일을 읽을 수 없습니다. sample_data 폴더에 CSV 파일이 있는지 확인해주세요.")
+        else:
+            analyze(sample_before, sample_changes, "변경 전·후 예시 데이터 (coa_before_sample.csv → coa_after_sample.csv, "
+                    "changes_sample.csv)", specs, window_days, sample_after,
+                    {"before": (SAMPLE_BEFORE.name, "Wide Format"), "after": (SAMPLE_AFTER.name, "Long Format")})
+    elif start_clicked or compare_clicked:
+        if not ready:
+            st.error("변경 전·후 COA 파일을 모두 올리고, 위 안내에 따라 문제를 해결해주세요.")
+        elif changes_file is not None and changes_df is None:
+            st.error("업로드한 4M 변경 이력 CSV에 문제가 있습니다. 파일을 수정하거나 업로드를 취소해주세요.")
+        else:
+            (before_file, before_df, _, before_fmt), (after_file, after_df, _, after_fmt) = loaded["before"], loaded["after"]
+            source = f"변경 전·후 비교 ({before_file.name} → {after_file.name}" + (f", {changes_file.name})" if changes_file else ")")
+            analyze(before_df, changes_df, source, specs, window_days, after_df,
+                    {"before": (before_file.name, before_fmt), "after": (after_file.name, after_fmt)})
+elif sample_clicked or (start_clicked and coa_file is None):
     try:
         sample_coa = analyzer.load_coa_csv(SAMPLE_COA)
         sample_changes = analyzer.load_changes_csv(SAMPLE_CHANGES)
@@ -460,7 +660,8 @@ elif start_clicked or confirm_clicked:
         analyze(coa_df, changes_df, source, specs, window_days)
 
 if st.session_state.result is None:
-    st.info("👆 **샘플 데이터로 분석하기**를 누르거나, COA 파일을 업로드한 뒤 **이대로 분석하기**를 눌러주세요.")
+    st.info("👆 변경 전·후 COA를 올린 뒤 **변경 전·후 분석하기**를 누르거나, **분석 시작**을 눌러 예시 데이터로 확인해 보세요."
+            if compare_mode else "👆 **샘플 데이터로 분석하기**를 누르거나, COA 파일을 업로드한 뒤 **이대로 분석하기**를 눌러주세요.")
 else:
     show_results(st.session_state.result)
 

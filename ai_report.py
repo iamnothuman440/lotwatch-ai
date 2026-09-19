@@ -11,6 +11,7 @@ QC 담당자가 읽기 쉬운 한국어 분석 리포트를 만듭니다.
 
 import json
 import math
+from datetime import timedelta
 
 import streamlit as st
 from google import genai
@@ -39,11 +40,16 @@ LotWatch AI가 계산한 공급사 COA/수입검사 데이터의 통계 분석 �
 - 4M 변경 이력이 없다는 것은 '등록된 기록이 없다'는 뜻일 뿐, 실제로 변경이 없었다는 뜻이 아닙니다.
 - 규격 부적합(규격을 벗어남)과 규격 이내의 변화(평소와 달라짐)를 구분해서 설명하세요.
 - 품질 변화(품질 특성 평균의 통계적 변화)와 시험방법 변경은 성격이 다르므로 구분해서 설명하세요.
-- 변화 시점과 4M 변경 이력의 날짜 차이를 근거로 시간적 관계를 설명하세요. (분석 결과의 '변화 시점 N일 전/후'로 선후를 판단)
-  - '변화 시점 N일 전/후' 표현은 분석 결과에 적힌 그대로 옮겨 쓰고, 전/후 방향을 바꾸거나 날짜를 다시 계산하지 마세요. 여러 변화를 한 문장에 묶지 말고 변화마다 따로 쓰세요.
-  - 각 변화의 '근접한_4M_변경'에 없는 4M 기록은 모두 그 변화의 비교 범위 밖입니다. 이런 기록을 언급할 때는 반드시 "비교 범위 밖"이라는 표현을 그대로 쓰고, 변화의 직접 원인처럼 연결하지 마세요. 반대로 '근접한_4M_변경'에 있는 기록에는 "비교 범위 밖"이라고 쓰지 마세요.
-  - 4M 변경이 변화 시점 '이후'(변화 이후 기록)이면 품질 변화의 원인처럼 쓰지 말고, 그 변화에 미친 영향이나 관련 가능성을 확인하라는 식으로도 연결하지 마세요. 예: "변화 시점 N일 후에 발생한 4M 기록으로, 해당 품질 변화의 직접적인 원인으로 볼 수 없습니다. 다만 후속 변화와의 관련성 확인이 필요한 경우 참고할 수 있습니다."
-  - 4M 변경이 변화 시점 '이전'이어도 시간 순서만으로 원인이라고 단정하지 말고, "관련 가능성을 확인할 필요가 있습니다" 정도로 쓰세요.
+- 시험방법_변경_건수가 '분석하지 않음'이면 시험방법 정보가 없거나 일부 데이터에만 있어 분석하지 않았다는 뜻입니다. "시험방법 변경 없음"으로 쓰지 말고, '시험방법_변경'에 적힌 이유대로 시험방법 변경 분석을 하지 않았다고 쓰세요.
+- '변경_전후_비교'가 있으면 사용자가 변경 전·후로 지정한 두 COA를 합쳐 분석한 결과입니다.
+  - 변경 전·후 평균, 변화량, 변화율은 적힌 그대로 인용하세요. 단순 평균 비교이므로, 통계적으로 의미 있는 변화인지는 품질특성별_결과의 '변화_감지'를 따르세요.
+  - 파일이 변경 전·후로 나뉘어 있다는 사실이나 4M 기록만으로 변화의 원인을 단정하지 마세요. 금지 예: "공급업체가 원료를 변경해서 Moisture가 상승했다" / 허용 예: "변경 후 Moisture 평균이 상승했으며, 해당 기간의 4M 변경 이력과 시간적 관계를 확인할 필요가 있습니다"
+  - 두 파일에 모두 있는 Lot이나 변경 전보다 빠른 변경 후 날짜가 있으면, 권장 확인사항에 데이터 확인을 포함하세요.
+- 4M 변경 이력과 각 변화의 시간적 관계는 LotWatch AI(Python)가 이미 판정했고, 이 판정이 최종 기준입니다. 각 변화의 '4M_비교'에 적힌 temporal_relation과 '판정'을 그대로 따르고, 4M 날짜와 변화 시점의 차이나 비교 범위를 다시 계산하거나 시간적 관련성을 스스로 판단하지 마세요.
+  - temporal_relation이 "within_range"(비교 범위 안)인 기록만 시간적으로 근접한 기록으로 설명하세요. 예: "품질 변화 시점과 가까운 4M 변경 이력이 등록되어 있습니다." 변경 내용과 품질 영향 확인을 권할 수는 있지만, 시간적 근접성은 인과관계를 뜻하지 않으므로 원인으로 단정하지 마세요. 변화 이후 기록(days_from_change가 양수)이면 해당 품질 변화의 원인으로 볼 수 없다는 점도 밝히세요.
+  - temporal_relation이 "out_of_range"(비교 범위 밖)인 기록은 품질 변화와 관련된 변경으로 표현하거나 관련 가능성·원인 가능성이 있다고 제시하지 마세요. 권장 확인사항에도 이 기록과 품질 변화의 관련성 확인을 넣지 마세요. 필요할 때만 "가장 가까운 등록 이력은 비교 범위 밖에 있습니다." 정도로 쓰세요.
+  - 변화의 temporal_relation이 "no_record"이면 "해당 비교 범위 내 등록된 4M 변경 이력이 없습니다"라고 쓰세요. 비교 범위 밖에만 기록이 있는 경우(관련 4M 변경 없음)와 등록된 4M 변경 이력이 전혀 없는 경우는 '판정'에 적힌 대로 구분하고, "no_4m_data"이면 4M 변경 이력이 제공되지 않아 비교하지 않았다고 쓰세요.
+  - '변화 시점 N일 전/후' 표현은 '설명'에 적힌 그대로 옮겨 쓰고 전/후 방향을 바꾸지 마세요. 여러 변화를 한 문장에 묶지 말고 변화마다 따로 쓰세요.
   - 이 원칙은 '데이터 근거'와 '권장 확인사항'을 포함한 모든 섹션에 똑같이 적용하세요.
 - 문장은 간결하게, 전문 용어는 짧게 풀어서 쓰세요.
 
@@ -78,24 +84,47 @@ def _day(date):
     return date.strftime("%Y-%m-%d")
 
 
-def _four_m_relation(four_m, window_days):
-    """변화 시점과 4M 변경 이력의 시간적 관계를 정리합니다."""
-    if not four_m["has_data"]:
-        return "4M 변경 이력 데이터가 제공되지 않음"
-
-    def describe(r, in_range):
-        # 선후관계와 범위 밖 여부를 AI가 계산하지 않아도 되도록 글로 적어 줍니다.
-        when = "변화 이후 기록" if r["days"] > 0 else "변화 이전 기록" if r["days"] < 0 else "변화와 같은 날 기록"
-        scope = "" if in_range else ", 비교 범위 밖"
-        return f"{_day(r['date'])} {r['type']} ({r['description']}), {analyzer.days_text(r['days'])} ({when}{scope})"
-
+def _four_m_relation(four_m, event_date, window_days):
+    """변화 시점과 4M 변경 이력의 시간적 관계를 AI에게 '판정 결과'로 넘깁니다. (AI가 날짜를 다시 계산하지 않도록)
+    범위 안/밖은 analyzer.compare_with_4m()이 계산한 nearby를 그대로 옮깁니다.
+    temporal_relation — 기록마다: within_range(비교 범위 안) / out_of_range(비교 범위 밖)
+                      — 변화마다: within_range(범위 안 기록 있음) / no_record(범위 안 등록 이력 없음) / no_4m_data(4M 파일 없음)"""
+    window = timedelta(days=window_days)
     relation = {
-        "근접_판단_기준": f"변화 시점 전후 {window_days}일 이내",
-        "근접한_4M_변경": [describe(r, True) for r in four_m["nearby"]] or "해당 기간 내 등록된 이력 없음",
+        "change_date": _day(event_date),
+        "comparison_window": f"{_day(event_date - window)} ~ {_day(event_date + window)} (변화 시점 전후 {window_days}일)",
     }
-    if four_m["nearest"]:  # 범위 안 기록이 있으면 가장 가까운 기록도 범위 안
-        relation["가장_가까운_4M_변경"] = describe(four_m["nearest"], bool(four_m["nearby"]))
-    return relation
+    if not four_m["has_data"]:
+        return {**relation, "temporal_relation": "no_4m_data", "판정": "4M 변경 이력 데이터가 제공되지 않아 비교하지 않음"}
+
+    def record(r):
+        within = r in four_m["nearby"]
+        when = "변화 이후 기록" if r["days"] > 0 else "변화 이전 기록" if r["days"] < 0 else "변화와 같은 날 기록"
+        return {
+            "date": _day(r["date"]),
+            "category": r["type"],
+            "description": r["description"],
+            "days_from_change": r["days"],
+            "within_window": within,
+            "temporal_relation": "within_range" if within else "out_of_range",
+            "설명": f"{analyzer.days_text(r['days'])} ({when}, {'비교 범위 안' if within else '비교 범위 밖'})",
+        }
+
+    if four_m["nearby"]:
+        verdict = "비교 범위 안에 등록된 4M 변경 이력이 있음 (시간적으로 가까울 뿐, 원인이라는 뜻이 아님)"
+    elif four_m["records"]:
+        verdict = "해당 비교 범위 내 등록된 4M 변경 이력 없음 (가장 가까운 등록 이력은 비교 범위 밖)"
+    else:
+        verdict = "등록된 4M 변경 이력이 전혀 없음"
+    # ponytail: 4M 기록 전체를 변화마다 전달 — 기록이 수백 건이면 가까운 순 N건으로 줄일 것
+    return {
+        **relation,
+        "temporal_relation": "within_range" if four_m["nearby"] else "no_record",
+        "판정": verdict,
+        "registered_4m_count": len(four_m["records"]),
+        "four_m_records": [record(r) for r in four_m["records"]],
+        "nearest_4m": _day(four_m["nearest"]["date"]) if four_m["nearest"] else None,
+    }
 
 
 def build_summary(result):
@@ -128,18 +157,18 @@ def build_summary(result):
                 "평소_변동폭_대비_배수": round(float(c["effect"]), 1) if math.isfinite(c["effect"]) else "매우 큼",
                 "t검정_p값": "< 0.001" if c["p_value"] < 0.001 else round(float(c["p_value"]), 3),
             }
-            entry["4M_비교"] = _four_m_relation(info["four_m"], window)
+            entry["4M_비교"] = _four_m_relation(info["four_m"], c["date"], window)
         items[name] = entry
 
     changes = result["changes_4m"]
     start, end = result["period"]
-    return {
+    summary = {
         "공급사": ", ".join(result["suppliers"]) or "미기재",
         "분석_기간": f"{_day(start)} ~ {_day(end)}",
         "총_Lot": result["total_lots"],
         "규격_부적합_Lot수": result["oos_lots"],
         "품질_변화_감지_건수": result["quality_changes"],
-        "시험방법_변경_건수": result["method_change_count"],
+        "시험방법_변경_건수": result["method_change_count"] if result["has_method"] else "분석하지 않음",
         "확인_권고_건수": result["check_recommended"],
         "종합_상태": result["overall_status"],
         "품질특성별_결과": items,
@@ -148,15 +177,40 @@ def build_summary(result):
                 "변경": f"{e['from']} → {e['to']}",
                 "시작_Lot": e["lot"],
                 "시작일": _day(e["date"]),
-                "4M_비교": _four_m_relation(e["four_m"], window),
+                "4M_비교": _four_m_relation(e["four_m"], e["date"], window),
             }
             for e in result["method_changes"]
-        ] or "변경 없음",
-        "4M_변경_이력": [
-            {"날짜": _day(row.Date), "유형": row.Type, "내용": row.Description}
-            for row in changes.itertuples()
-        ] if changes is not None else "제공되지 않음",
+        ] or ("변경 없음" if result["has_method"] else result["method_notice"]),
+        # 원본 날짜 목록 대신 건수만: 각 기록의 시간적 관계는 변화별 '4M_비교'에 판정과 함께 들어 있음
+        "4M_변경_이력": f"{len(changes)}건 등록 (변화별 시간적 관계는 각 '4M_비교'의 temporal_relation 참고)"
+                        if changes is not None else "제공되지 않음",
         "참고사항": result["notices"],
+    }
+    if result.get("comparison"):  # 변경 전·후 COA 비교 모드
+        summary["변경_전후_비교"] = _before_after_summary(result["comparison"])
+    return summary
+
+
+def _before_after_summary(c):
+    """변경 전·후 비교 모드에서 AI에게 추가로 알려줄 사실 (전후 구분은 사용자가 지정한 그대로)"""
+    def period(p):
+        return {"Lot수": p["lots"], "기간": f"{_day(p['period'][0])} ~ {_day(p['period'][1])}",
+                "시험방법": ", ".join(p["methods"]) or "정보 없음"}
+
+    return {
+        "변경_전": period(c["before"]),
+        "변경_후": period(c["after"]),
+        "품질특성별_평균_비교": {
+            item: {
+                "변경_전_평균": _num(v["before_mean"]),
+                "변경_후_평균": _num(v["after_mean"]),
+                "변화량": _num(v["diff"]),
+                "변화율_퍼센트": "계산 불가 (변경 전 평균 0)" if v["diff_pct"] is None else round(float(v["diff_pct"]), 1),
+            }
+            for item, v in c["items"].items()
+        },
+        "두_파일에_모두_있는_Lot": c["duplicate_lots"] or "없음",
+        "변경_후_날짜가_변경_전보다_빠른_데이터": "있음" if c["dates_reversed"] else "없음",
     }
 
 
@@ -223,12 +277,19 @@ def build_template_report(result):
         "> 아래 내용은 AI가 아닌 통계 분석 결과로 자동 작성된 요약입니다.",
         "",
         "#### 1. 핵심 발견",
-        f"- 총 {result['total_lots']} Lot 중 규격 부적합 {result['oos_lots']} Lot, 품질 변화 {result['quality_changes']}건, "
-        f"시험방법 변경 {result['method_change_count']}건이 감지되었습니다.",
+        f"- 총 {result['total_lots']} Lot 중 규격 부적합 {result['oos_lots']} Lot, 품질 변화 {result['quality_changes']}건"
+        + (f", 시험방법 변경 {result['method_change_count']}건" if result["has_method"] else "") + "이 감지되었습니다.",
         f"- 종합 상태: {result['overall_status']} — {result['overall_message']}",
         "",
         "#### 2. 데이터 근거",
     ]
+    ba = result.get("comparison")
+    if ba:  # 변경 전·후 비교 모드: 파일별 Lot 수·기간과 전후 평균
+        for key, label in (("before", "변경 전"), ("after", "변경 후")):
+            lines.append(f"- {label} COA: {ba[key]['lots']} Lot ({_day(ba[key]['period'][0])} ~ {_day(ba[key]['period'][1])})")
+        for name, v in ba["items"].items():
+            pct = "변화율 계산 불가" if v["diff_pct"] is None else f"{v['diff_pct']:+.1f}%"
+            lines.append(f"- {name} 변경 전·후 평균: {v['before_mean']:.3f} → {v['after_mean']:.3f} ({v['diff']:+.3f}, {pct})")
     for name, info in result["items"].items():
         spec = f"규격 {info['spec'][0]:.2f} ~ {info['spec'][1]:.2f}"
         if info["detected"]:
@@ -244,6 +305,8 @@ def build_template_report(result):
             lines.append(f"- {name} 규격 부적합 Lot: {', '.join(info['oos_lots'][:10])}{more}")
     for ev in result["method_changes"]:
         lines.append(f"- 시험방법: {ev['from']} → {ev['to']} (Lot {ev['lot']}부터, {_day(ev['date'])})")
+    if not result["has_method"]:
+        lines.append(f"- 시험방법: {result['method_notice']}")
     for e in result["events"]:
         four_m = e["four_m"]
         for r in four_m["nearby"]:  # 비교 범위 안의 기록: 기존 표시 그대로
@@ -267,6 +330,10 @@ def build_template_report(result):
         lines.append(f"- 시험방법 변경({ev['from']} → {ev['to']})의 사유와 이전 방법과의 비교(동등성) 자료를 공급사에 요청해 주세요.")
     if result["oos_lots"]:
         lines.append("- 규격 부적합 Lot의 재시험 여부와 사용 가능 여부를 검토해 주세요.")
+    if ba and ba["duplicate_lots"]:
+        lines.append(f"- 변경 전·후 파일에 모두 있는 Lot({', '.join(ba['duplicate_lots'][:10])})이 중복 포함되었는지 확인해 주세요.")
+    if ba and ba["dates_reversed"]:
+        lines.append("- 변경 후 데이터의 일부 날짜가 변경 전 데이터보다 빠르므로, 입력한 전후 구분을 확인해 주세요.")
     lines.append("- 이후 입고되는 Lot도 같은 기준으로 계속 모니터링해 주세요.")
     return "\n".join(lines).replace("~", r"\~")  # '~'가 취소선으로 보이지 않게 처리
 
